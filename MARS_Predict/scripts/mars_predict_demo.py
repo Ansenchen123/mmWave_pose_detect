@@ -1,11 +1,65 @@
 # -*- coding: utf-8 -*-
 """
-mars_predict_demo.py  (v2)
-==========================
-載入 feature map，用 MARS 預訓練模型推論，顯示互動 demo。
+mars_predict_demo.py
+====================
+載入 feature map，用 MARS 預訓練模型推論，顯示互動式姿態估計 demo。
 
-執行：
-    python mars_predict_demo.py --input featuremap_mars_pointcloud.npy
+完整工作流程：
+  1. 點雲資料 (.mat)
+     ↓
+  2. pc_to_featuremap_v2_mars.py   → feature map (.npy)
+     ↓
+  3. mars_predict_demo.py          → 姿態推論 + 視覺化
+
+用法：
+  # 顯示預設檔案（reference 類別）
+  python mars_predict_demo.py
+
+  # 指定自訂 feature map
+  python mars_predict_demo.py --input feature/standard_pose/mars_pointcloud_0506.npy
+
+  # 指定模型路徑
+  python mars_predict_demo.py --input feature/reference/*.npy --model model/MARS.h5
+
+  # 儲存推論結果
+  python mars_predict_demo.py --input feature/reference/mars_pointcloud_0506.npy --save_pred pred_output.npy
+
+預設檔案位置：
+  feature/reference/featuremap_test.npy
+
+互動控制：
+  ← → 鍵     : 逐 frame 切換
+  A / D 鍵   : 逐 frame 切換
+  PageUp     : 往前跳 50 frames
+  PageDown   : 往後跳 50 frames
+  滑塊       : 直接選擇 frame
+
+顯示內容（雙視圖）：
+  左欄 - Radar Point Cloud:
+    • 3D 散點圖
+    • x 軸：左右（m）
+    • y 軸：深度（m）
+    • z 軸：高度（m）
+    • 顏色：強度值（turbo colormap）
+
+  右欄 - MARS Estimation (19 joints):
+    • 骨骼關節點位置
+    • 關節名稱標籤
+    • 座標同左欄
+
+  下方 - 關節角度:
+    • 左肘角度
+    • 右肘角度
+    • 左膝角度
+    • 右膝角度
+
+輸入格式：
+  feature map (.npy)
+  形狀：(N, 8, 8, 5)  其中 5 = [x, y, z, doppler, intensity]
+
+輸出格式（可選）：
+  預測標籤 (.npy)
+  形狀：(N, 57)  即 19 joints × 3 axis
 """
 
 import os, sys, argparse

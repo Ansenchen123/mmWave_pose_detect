@@ -1,16 +1,34 @@
 # -*- coding: utf-8 -*-
 """
-pc_to_featuremap.py  (v2)
-=========================
-將你的 IWR6843 點雲轉換成 MARS feature map 格式。
+pc_to_featuremap_v2_mars.py
+===========================
+將 IWR6843 點雲（.mat 或 .npy）轉換成 MARS feature map 格式。
 
-關鍵發現（從 MARS featuremap_test.npy 逆向工程）：
-  - MARS featuremap 存的是「真實公尺值」，完全未正規化
-  - 座標軸：x=左右, y=深度, z=高度
-  - row → x 軸（左右），col → y 軸（深度）
+MARS 標準轉換流程：
+  1. 依 x→y→z 排序點雲
+  2. 截斷或補零到 64 點
+  3. reshape 成 (8,8,5)
+  4. 座標保留「真實公尺值」（未正規化）
 
-執行：
-    python pc_to_featuremap_2.py --input mars_pointcloud.mat
+用法：
+  # 單個檔案
+  python pc_to_featuremap_v2_mars.py --input pointcloud/standard/mars_pointcloud_0506.mat
+
+  # 批量處理整個目錄
+  python pc_to_featuremap_v2_mars.py --all_files True
+
+  # 自訂來源目錄
+  python pc_to_featuremap_v2_mars.py --input pointcloud/reference/*.mat
+
+輸出位置：
+  feature/standard/  （自動建立）
+  └─ mars_pointcloud_0506.npy
+  └─ ...其他檔案
+
+座標軸定義：
+  x = 左右（-1.0 ~ 1.0 m）
+  y = 深度（0.3 ~ 3.0 m）
+  z = 高度（-1.0 ~ 1.0 m）
 """
 
 import os, sys, argparse

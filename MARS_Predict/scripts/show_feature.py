@@ -1,11 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-show_pointcloud.py
-==================
-讀入 .npy 點雲檔案並互動顯示。
+show_feature.py
+===============
+讀入轉換後的 feature map (.npy) 並互動顯示雷達點雲。
 
-執行：
-    python show_pointcloud.py --input featuremap_mars_pointcloud.npy
+用法：
+  # 顯示預設檔案（standard_pose 類別）
+  python show_feature.py
+
+  # 指定自訂檔案
+  python show_feature.py --input feature/reference/mars_pointcloud_0506.npy
+
+  # 快速切換類別
+  python show_feature.py --file_class reference
+
+預設檔案位置：
+  feature/standard_pose/mars_pointcloud_0506_Both_upper_limb_extension.npy
+
+互動控制：
+  ← → 鍵     : 逐 frame 切換
+  A / D 鍵   : 逐 frame 切換
+  PageUp     : 往前跳 50 frames
+  PageDown   : 往後跳 50 frames
+  滑塊       : 直接選擇 frame
+
+顯示內容：
+  - 3D 點雲散點圖
+  - x 軸：左右（m）
+  - y 軸：深度（m）
+  - z 軸：高度（m）
+  - 顏色：強度值（turbo colormap）
+
+輸入格式：
+  feature map (.npy)
+  形狀：(N, 8, 8, 5)  其中 5 = [x, y, z, doppler, intensity]
 """
 
 import os, sys, argparse
