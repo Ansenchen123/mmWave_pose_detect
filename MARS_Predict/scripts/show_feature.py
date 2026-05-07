@@ -49,7 +49,7 @@ import util.get_abs_dir as get_abs_dir
 
 file_class = 'test' # 'standard' 'reference' 'test'
 FEATURE_DIR = os.path.normpath(f'feature\{file_class}')
-FEATURE_FILE = 'radar_capture_20260507_230746'
+FEATURE_FILE = 'radar_capture_5'
 
 
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']

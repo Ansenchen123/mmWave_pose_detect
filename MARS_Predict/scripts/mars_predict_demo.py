@@ -79,6 +79,11 @@ except ImportError:
 
 import util.get_abs_dir as get_abs_dir
 
+path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
+file_class = 'test' # 'standard' 'reference' 'test'
+deature_name = 'radar_capture_5.npy'
+deature_name = deature_name if deature_name.endswith('.npy') else f'{deature_name}.npy'
+
 # 軸範圍：與 MARS 原版 demo 完全一致（從論文截圖量測）
 PC_X  = (-1.0, 1.0)
 PC_Y  = ( 0.0, 3.0)
@@ -278,12 +283,7 @@ class MARSPredictDemo:
         plt.show()
 
 
-def main():
-    path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
-    file_class = 'test' # 'standard' 'reference' 'test'
-    deature_name = 'radar_capture_20260508_001856.npy'
-    deature_name = deature_name if deature_name.endswith('.npy') else f'{deature_name}.npy'
-    
+def main():    
     parser = argparse.ArgumentParser()
     parser.add_argument('--input',     default=None)
     parser.add_argument('--model',     default='model/MARS.h5')

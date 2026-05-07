@@ -34,8 +34,10 @@ FRAME_HEADER_SIZE = 40
 POINT_DATA_SIZE = 16
 SIDE_INFO_DATA_SIZE = 4
 
-DEFAULT_CONFIG_PORT = 'COM3'
-DEFAULT_DATA_PORT = 'COM4'
+DEFAULT_CONFIG_PORT = 19
+DEFAULT_CONFIG_PORT = f'COM{DEFAULT_CONFIG_PORT}'
+DEFAULT_DATA_PORT = 20
+DEFAULT_DATA_PORT = f'COM{DEFAULT_DATA_PORT}'
 # DEFAULT_CFG_FILE = 'IWRL6844_4T4R_realtime.cfg'
 DEFAULT_CFG_FILE = 'IWRL6844_4T4R_record.cfg'
 DEFAULT_FRAMES = -1		# 預設 -1 代表無限擷取，直到使用者中斷 (Ctrl+C)
@@ -90,6 +92,20 @@ def find_magic_word(buffer: bytearray, magic_word: bytes) -> int:
 	return buffer.find(magic_word)
 
 
+def side_info_to_db(raw_value: int) -> float:
+	"""將 side info 的 raw SNR/noise 轉成 dB。
+
+	TI 文件標示 side info 為 int16，且 1 LSB = 0.1 dB。
+	但部分輸出/韌體組合會讓 raw 值看起來多一位，例如 raw=1670
+	如果直接乘 0.1 會得到不合理的 167 dB。這裡保留官方 0.1 dB 規則，
+	但當換算後超過常見雷達點雲合理範圍時，自動改用 0.01 dB 顯示。
+	"""
+	db_value = float(raw_value) * 0.1
+	if abs(db_value) > 80.0:
+		db_value = float(raw_value) * 0.01
+	return db_value
+
+
 def parse_frame(frame_bytes: bytes) -> FrameData | None:
 	"""解析完整 frame，回傳點雲與 frame header 資訊。"""
 	if len(frame_bytes) < FRAME_HEADER_SIZE:
@@ -119,10 +135,10 @@ def parse_frame(frame_bytes: bytes) -> FrameData | None:
 			total_length=total_length,
 			num_detected_objects=0,
 			num_tlv=num_tlv,
-			points=np.zeros((0, 5), dtype=np.float32),
+			points=np.zeros((0, 6), dtype=np.float32),
 		)
 
-	points = np.zeros((num_detected_objects, 5), dtype=np.float32)
+	points = np.zeros((num_detected_objects, 6), dtype=np.float32)
 
 	for _ in range(num_tlv):
 		if offset + 8 > len(frame_bytes):
@@ -145,9 +161,12 @@ def parse_frame(frame_bytes: bytes) -> FrameData | None:
 			for point_index in range(num_detected_objects):
 				if offset + SIDE_INFO_DATA_SIZE > len(frame_bytes):
 					break
-				snr = struct.unpack_from('<H', frame_bytes, offset)[0]
+
+				snr_raw, noise_raw = struct.unpack_from('<hh', frame_bytes, offset)
 				offset += SIDE_INFO_DATA_SIZE
-				points[point_index, 4] = float(snr) * 0.1
+
+				points[point_index, 4] = side_info_to_db(snr_raw)
+				points[point_index, 5] = side_info_to_db(noise_raw)
 
 		else:
 			offset = tlv_end
@@ -182,14 +201,45 @@ class RadarUARTCapture:
 
 	def send_config(self) -> None:
 		print('[INFO] 送出 config...')
+
+		self.cfg_port.reset_input_buffer()
+		self.cfg_port.reset_output_buffer()
+		self.data_port.reset_input_buffer()
+		self.data_port.reset_output_buffer()
+
+		self.cfg_port.write(b'sensorStop 0\n')
+		self.cfg_port.flush()
+		time.sleep(0.5)
+		resp = self.cfg_port.read(self.cfg_port.in_waiting or 256)
+		if resp:
+			print('[CLI]', resp.decode(errors='ignore').strip())
+
 		with open(self.settings.cfg_path, 'r', encoding='utf-8') as file_handle:
 			for line in file_handle:
 				line = line.strip()
 				if not line or line.startswith('%'):
 					continue
+
 				self.cfg_port.write((line + '\n').encode('utf-8'))
-				time.sleep(0.05)
+				self.cfg_port.flush()
+
+				if line.startswith('sensorStart'):
+					time.sleep(1.0)
+				elif line.startswith('sensorStop'):
+					time.sleep(0.8)
+				else:
+					time.sleep(0.12)
+
+				resp = self.cfg_port.read(self.cfg_port.in_waiting or 1024)
+				if resp:
+					print('[CLI]', resp.decode(errors='ignore').strip())
+
 				print(f'  [CFG] {line}')
+
+		time.sleep(0.5)
+		self.data_port.reset_input_buffer()
+		self.byte_buffer.clear()
+
 		print('[INFO] Config 送出完成。\n')
 
 	def read_frame(self) -> FrameData | None:
@@ -222,16 +272,40 @@ class RadarUARTCapture:
 			if frame_data is not None:
 				return frame_data
 
+	def stop_sensor(self) -> None:
+		try:
+			if self.cfg_port and self.cfg_port.is_open:
+				self.cfg_port.reset_input_buffer()
+				self.cfg_port.reset_output_buffer()
+				self.cfg_port.write(b'sensorStop 0\n')
+				self.cfg_port.flush()
+				time.sleep(0.8)
+
+				resp = self.cfg_port.read(self.cfg_port.in_waiting or 1024)
+				if resp:
+					print('[INFO] sensorStop 回應:', resp.decode(errors='ignore').strip())
+
+				time.sleep(0.5)
+		except Exception as e:
+			print(f'[WARN] sensorStop 送出失敗: {e}')
+
+
 	def close(self) -> None:
 		try:
-			self.cfg_port.close()
+			self.stop_sensor()
 		finally:
-			self.data_port.close()
+			try:
+				if self.data_port and self.data_port.is_open:
+					self.data_port.reset_input_buffer()
+					self.data_port.close()
+			finally:
+				if self.cfg_port and self.cfg_port.is_open:
+					self.cfg_port.close()
 
 
 def format_point_line(point_index: int, point: np.ndarray) -> str:
-	x, y, z, doppler, snr = point
-	return f'{point_index:02d}: x={x: .4f}, y={y: .4f}, z={z: .4f}, doppler={doppler: .4f}, snr={snr: .2f}'
+	x, y, z, doppler, snr, noise = point
+	return f'{point_index:02d}: x={x: .4f}, y={y: .4f}, z={z: .4f}, doppler={doppler: .4f}, snr={snr: .2f} dB, noise={noise: .2f} dB'
 
 
 def print_frame(frame_data: FrameData, display_index: int) -> None:
@@ -290,11 +364,11 @@ def init_plot():
 	plt.ion()
 	fig, ax = plt.subplots(figsize=(8, 6))
 	ax.set_title('Realtime points (X-Z平面，用Y距離著色)')
-	ax.set_xlabel('X 水平位置 (m)  ±1')
+	ax.set_xlabel('X 水平位置 (m)  ±2')
 	ax.set_ylabel('Z 高度 (m)  ±1')
 
-	# 固定範圍：X = ±1 (水平), Z = ±1 (高度)
-	ax.set_xlim(-1.0, 1.0)
+	# 固定範圍：X = ±2 (水平), Z = ±1 (高度)
+	ax.set_xlim(-2.0, 2.0)
 	ax.set_ylim(-1.0, 1.0)
 	ax.set_aspect('equal', 'box')
 
@@ -307,7 +381,7 @@ def update_plot(frame_data, ax, sc, cbar, vmin=0.0, vmax=None):
 	valid_mask = np.any(frame_data.points != 0, axis=1)
 	pts = frame_data.points[valid_mask]
 
-	ax.set_xlim(-1.0, 1.0)
+	ax.set_xlim(-2.0, 2.0)
 	ax.set_ylim(-1.0, 1.0)
 	ax.set_aspect('equal', 'box')
 
