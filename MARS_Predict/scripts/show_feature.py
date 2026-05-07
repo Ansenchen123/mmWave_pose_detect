@@ -61,17 +61,21 @@ def fmap_to_pts(fmap):
 
 
 class PointCloudViewer:
-    def __init__(self, fmaps):
+    def __init__(self, fmaps, title_suffix=''):
         self.fmaps = fmaps
         self.N = len(fmaps)
         self.idx = 0
+        self.title_suffix = title_suffix
         self._build()
         self._update(0)
 
     def _build(self):
         self.fig = plt.figure(figsize=(10, 8), facecolor='white')
-        self.fig.canvas.manager.set_window_title('Point Cloud Viewer')
-        
+        window_title = 'Point Cloud Viewer'
+        if self.title_suffix:
+            window_title += f' - {self.title_suffix}'
+        self.fig.canvas.manager.set_window_title(window_title)
+
         outer = gridspec.GridSpec(2, 1, figure=self.fig,
                                   height_ratios=[5, 0.75], hspace=0.08)
         self.ax_pc = self.fig.add_subplot(outer[0], projection='3d')
@@ -158,8 +162,9 @@ def main():
     if fmaps.ndim != 4 or fmaps.shape[1:] != (8, 8, 5):
         print(f'[WARNING] 期望形狀 (N,8,8,5)，實際 {fmaps.shape}')
 
+    file_name = os.path.splitext(os.path.basename(args.input))[0]
     print(f'\n[控制] ← → 換 frame｜A/D 換 frame｜PageUp/Down 跳 50 frames')
-    PointCloudViewer(fmaps).show()
+    PointCloudViewer(fmaps, title_suffix=file_name).show()
 
 
 if __name__ == '__main__':

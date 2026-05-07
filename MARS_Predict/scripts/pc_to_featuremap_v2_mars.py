@@ -38,7 +38,7 @@ import glob
 import util.get_abs_dir as get_abs_dir
 
 # 預設路徑（可透過 --input 覆蓋）
-file_class = 'standard' # 'standard' 或 'reference'
+file_class = 'reference' # 'standard' 或 'reference'
 # 路徑由 path_project_root + POINTCLOUD_DIR + POINTCLOUD_FILE 組成
 POINTCLOUD_DIR = os.path.normpath(f'pointcloud\{file_class}')
 POINTCLOUD_FILE = 'mars_pointcloud_0506_Both_upper_limb_extension'

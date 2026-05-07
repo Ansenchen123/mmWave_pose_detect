@@ -114,6 +114,14 @@ JOINT_NAMES = [
     '右髖','右膝','右踝','右腳'
 ]
 
+# 關節角度對應表
+JOINT_ANGLES = {
+    'Left elbow':  (5, 6, 7),    # 左肩 → 左肘 → 左手腕
+    'Right elbow': (8, 9, 10),   # 右肩 → 右肘 → 右手腕
+    'Left knee':   (11, 12, 13), # 左髖 → 左膝 → 左踝
+    'Right knee':  (15, 16, 17), # 右髖 → 右膝 → 右踝
+}
+
 
 
 
@@ -147,12 +155,11 @@ def joint_angle(a, b, c):
 
 
 def get_angles(j):
-    return {
-        'Left elbow':  joint_angle(j[4],  j[5],  j[6]),
-        'Right elbow': joint_angle(j[7],  j[8],  j[9]),
-        'Left knee':   joint_angle(j[10], j[11], j[12]),
-        'Right knee':  joint_angle(j[13], j[14], j[15]),
-    }
+    """計算四個主要關節角度"""
+    angles = {}
+    for name, (a_idx, b_idx, c_idx) in JOINT_ANGLES.items():
+        angles[name] = joint_angle(j[a_idx], j[b_idx], j[c_idx])
+    return angles
 
 
 def fmap_to_pts(fmap):
@@ -161,17 +168,21 @@ def fmap_to_pts(fmap):
 
 
 class MARSPredictDemo:
-    def __init__(self, fmaps, y_pred):
+    def __init__(self, fmaps, y_pred, title_suffix=''):
         self.fmaps = fmaps
         self.pred  = y_pred
         self.N     = len(fmaps)
         self.idx   = 0
+        self.title_suffix = title_suffix
         self._build()
         self._update(0)
 
     def _build(self):
         self.fig = plt.figure(figsize=(12, 6), facecolor='white')
-        self.fig.canvas.manager.set_window_title('MARS Predict Demo — My IWR6843 Data')
+        window_title = 'MARS Predict Demo — My IWR6843 Data'
+        if self.title_suffix:
+            window_title += f' - {self.title_suffix}'
+        self.fig.canvas.manager.set_window_title(window_title)
         outer = gridspec.GridSpec(2, 1, figure=self.fig,
                                   height_ratios=[5, 0.75], hspace=0.08)
         top = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=outer[0], wspace=0.05)
@@ -270,6 +281,8 @@ class MARSPredictDemo:
 def main():
     path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
     file_class = 'reference' # 'standard_pose' 或 'reference'
+    deature_name = 'featuremap_test.npy'
+    deature_name = deature_name if deature_name.endswith('.npy') else f'{deature_name}.npy'
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--input',     default=None)
@@ -278,7 +291,7 @@ def main():
     args = parser.parse_args()
 
     if args.input is None:
-        args.input = os.path.join(path_project_root, path_feature, file_class, 'featuremap_test.npy')
+        args.input = os.path.join(path_project_root, path_feature, file_class, deature_name)
     print(f'[輸入] {args.input}, {"存在 " if os.path.isfile(args.input) else "不存在"}')
 
     fmaps = np.load(args.input).astype(np.float32)
@@ -294,8 +307,9 @@ def main():
         np.save(args.save_pred, y_pred)
         print(f'[儲存] {args.save_pred}')
 
+    file_name = os.path.splitext(os.path.basename(args.input))[0]
     print(f'\n[Demo] {len(y_pred)} frames，← → 換 frame，PageUp/Down 跳 50')
-    MARSPredictDemo(fmaps, y_pred).show()
+    MARSPredictDemo(fmaps, y_pred, title_suffix=file_name).show()
 
 
 if __name__ == '__main__':
