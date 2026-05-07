@@ -2,10 +2,10 @@
 """
 show_feature.py
 ===============
-讀入轉換後的 feature map (.npy) 並互動顯示雷達點雲。
+讀入轉換後的 feature map (.npy) 並互動顯示 3D 點雲。
 
 用法：
-  # 顯示預設檔案（standard_pose 類別）
+    # 顯示預設檔案（自動選擇最近一次的 radar_capture_*.npy）
   python show_feature.py
 
   # 指定自訂檔案
@@ -15,7 +15,7 @@ show_feature.py
   python show_feature.py --file_class reference
 
 預設檔案位置：
-  feature/standard_pose/mars_pointcloud_0506_Both_upper_limb_extension.npy
+    feature/test/radar_capture_*.npy
 
 互動控制：
   ← → 鍵     : 逐 frame 切換
@@ -45,6 +45,13 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa
 
 import util.get_abs_dir as get_abs_dir
 
+
+
+file_class = 'test' # 'standard' 'reference' 'test'
+FEATURE_DIR = os.path.normpath(f'feature\{file_class}')
+FEATURE_FILE = 'radar_capture_20260507_230746'
+
+
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
 plt.rcParams['axes.unicode_minus'] = False
 
@@ -58,6 +65,35 @@ def fmap_to_pts(fmap):
     """轉換 (8,8,5) feature map 為點雲 (N,5)"""
     pts = fmap.reshape(-1, 5)
     return pts[np.any(pts != 0, axis=1)]
+
+
+def find_default_feature_file(feature_dir):
+    """優先找最新的 radar_capture_*.npy，找不到就回退到 feature_dir 內最新的 .npy。"""
+    if not os.path.isdir(feature_dir):
+        return None
+
+    preferred = sorted(
+        [
+            os.path.join(feature_dir, name)
+            for name in os.listdir(feature_dir)
+            if name.startswith('radar_capture_') and name.endswith('.npy')
+        ],
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    if preferred:
+        return preferred[0]
+
+    fallback = sorted(
+        [
+            os.path.join(feature_dir, name)
+            for name in os.listdir(feature_dir)
+            if name.endswith('.npy')
+        ],
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    return fallback[0] if fallback else None
 
 
 class PointCloudViewer:
@@ -144,15 +180,11 @@ def main():
     path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
     parser = argparse.ArgumentParser(description='顯示雷達點雲')
     parser.add_argument('--input', default=None,
-                        help='輸入 .npy 檔案路徑')
+                        help='輸入 .npy 檔案名稱')
     args = parser.parse_args()
-
-    file_class = 'standard_pose' # 'standard_pose' 或 'reference'
-    FEATURE_DIR = os.path.normpath(f'feature\{file_class}')
-    FEATURE_FILE = 'mars_pointcloud_0506_Both_upper_limb_extension.npy'
-    FEATURE_FILE = f'{FEATURE_FILE if not FEATURE_FILE.endswith(".npy") else os.path.splitext(FEATURE_FILE)[0]}.npy'
     if (args.input is None) or (not os.path.isfile(args.input)):
-        args.input = os.path.join(path_project_root, FEATURE_DIR, FEATURE_FILE)
+        default_feature = find_default_feature_file(os.path.join(path_project_root, FEATURE_DIR))
+        args.input = default_feature if default_feature is not None else os.path.join(path_project_root, FEATURE_DIR, FEATURE_FILE)
     print(f'[輸入] {args.input}')
 
     print(f'[載入] {args.input}')

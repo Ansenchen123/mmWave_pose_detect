@@ -280,8 +280,8 @@ class MARSPredictDemo:
 
 def main():
     path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
-    file_class = 'reference' # 'standard_pose' 或 'reference'
-    deature_name = 'featuremap_test.npy'
+    file_class = 'test' # 'standard' 'reference' 'test'
+    deature_name = 'radar_capture_20260508_001856.npy'
     deature_name = deature_name if deature_name.endswith('.npy') else f'{deature_name}.npy'
     
     parser = argparse.ArgumentParser()

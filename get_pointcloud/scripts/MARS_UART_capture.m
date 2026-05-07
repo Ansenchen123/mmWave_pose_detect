@@ -4,12 +4,12 @@ clear; clc; close all;
 %% ============================================================
 %  設定區
 %% ============================================================
-CONFIG_PORT  = 'COM7';
-DATA_PORT    = 'COM8';
-CONFIG_FILE  = 'xwr68xx_MARS_UART_test.cfg';
+CONFIG_PORT  = 'COM3';
+DATA_PORT    = 'COM4';
+CONFIG_FILE  = 'IWRL6844_4T4R.cfg';
 N_FRAMES     = 200;
 MAX_POINTS   = 64;
-SAVE_FILE    = 'mars_pointcloud_0506_right_limb_extension.mat';
+SAVE_FILE    = 'tmp.mat';
 
 %% ============================================================
 %  TLV 常數
