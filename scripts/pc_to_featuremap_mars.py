@@ -35,18 +35,11 @@ import os, sys, argparse
 import numpy as np
 import glob
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.AbsDir import FileClass
 
-# 預設路徑（可透過 --input 覆蓋）
-file_class = 'reference' # 'standard' 或 'reference'
-# 路徑由 path_project_root + POINTCLOUD_DIR + POINTCLOUD_FILE 組成
-POINTCLOUD_DIR = os.path.normpath(f'pointcloud\{file_class}')
-POINTCLOUD_FILE = 'mars_pointcloud_0506_Both_upper_limb_extension'
-POINTCLOUD_FILE = f'{POINTCLOUD_FILE if not POINTCLOUD_FILE.endswith(".mat") else os.path.splitext(POINTCLOUD_FILE)[0]}.mat'
+FILE_CLASS = FileClass.TEST
 
-
-# 路徑由 path_project_root + FEATURE_DIR 組成，檔名會與來源的檔名相同
-FEATURE_DIR = os.path.normpath(f'feature\{file_class}')
 
 
 
@@ -158,16 +151,24 @@ def convert(pc):
 
 
 def main():
-    global POINTCLOUD_FILE
-    path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
+    absDir = AbsDir()
+    path_project_root = absDir.path_project_root
+    path_pointcloud_dir = absDir.get_pointcloud_dir_by_class(FILE_CLASS)
+    pointcloud_file_name = 'mars_pointcloud_0506_Both_upper_limb_extension'
+    pointcloud_file_name = pointcloud_file_name if pointcloud_file_name.endswith('.mat') else f'{pointcloud_file_name}.mat'
+    pointcloud_file = os.path.join(path_pointcloud_dir, pointcloud_file_name)
 
-    print(f'[預設] 來源點雲檔案: {os.path.join(POINTCLOUD_DIR, POINTCLOUD_FILE)}')
-    print(f'[預設] 輸出特徵圖路徑: {os.path.join(FEATURE_DIR)}')
+    feature_file_name = os.path.splitext(pointcloud_file_name)[0] + '.npy'
+    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+    feature_file = os.path.join(path_feature_dir, feature_file_name)
+
+    print(f'[預設] 來源點雲檔案: {pointcloud_file}')
+    print(f'[預設] 輸出特徵圖路徑: {feature_file}')
         
     parser = argparse.ArgumentParser()
     parser.add_argument('--input',   default=None)
-    # parser.add_argument('--output',  default=None)
-    parser.add_argument('--all_files',  default=False, 
+    parser.add_argument('--output',  default=None)
+    parser.add_argument('--auto',  default=False, 
                         help='若為True，處理所有在 POINTCLOUD_DIR 路徑下的.mat檔，並保存在同一路徑下的feature資料夾中')
     parser.add_argument('--mat_key', default='marsData')
     parser.add_argument('--x_range', type=float, nargs=2, default=[-1.5, 2.0],
@@ -177,10 +178,11 @@ def main():
     args = parser.parse_args()
     
     if args.all_files:
+        global POINTCLOUD_FILE
         POINTCLOUD_FILE = '*.mat'
 
     if (args.input is None) or (not os.path.isfile(args.input)):
-        args.input = os.path.join(path_project_root, POINTCLOUD_DIR, POINTCLOUD_FILE)
+        args.input = os.path.join(POINTCLOUD_DIR, POINTCLOUD_FILE)
     print(f'[輸入] {args.input}')
     input_file = glob.glob(args.input)
     
@@ -191,7 +193,7 @@ def main():
     for input_path in input_file:
         print(f'\n[處理] {input_path}')
         FEATURE_FILE = f'{os.path.splitext(os.path.basename(input_path))[0]}.npy'
-        output_file = os.path.join(path_project_root, FEATURE_DIR, FEATURE_FILE)
+        output_file = os.path.join(FEATURE_DIR, FEATURE_FILE)
 
         pc    = load_data(input_path, args.mat_key)
         fmaps = convert(pc)

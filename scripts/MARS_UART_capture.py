@@ -15,6 +15,31 @@
     這裡使用 side-info SNR 作為 intensity channel 的可用近似值。
 """
 
+
+#                       _oo0oo_
+#                      o8888888o
+#                      88" . "88
+#                      (| -_- |)
+#                      0\  =  /0
+#                    ___/`---'\___
+#                  .' \\|     |# '.
+#                 / \\|||  :  |||# \
+#                / _||||| -:- |||||- \
+#               |   | \\\  -  #/ |   |
+#               | \_|  ''\---/''  |_/ |
+#               \  .-\__  '-'  ___/-. /
+#             ___'. .'  /--.--\  `. .'___
+#          ."" '<  `.___\_<|>_/___.' >' "".
+#         | | :  `- \`.;`\ _ /`;.`/ - ` : | |
+#         \  \ `_.   \_ __\ /__ _/   .-` /  /
+#     =====`-.____`.___ \_____/___.-`___.-'=====
+#                       `=---='
+#
+#
+#     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+#               佛祖保佑         永无BUG
+
 from __future__ import annotations
 
 import argparse
@@ -24,33 +49,37 @@ import sys
 import time
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 import numpy as np
 import serial
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.AbsDir import FileClass
+
+from util.get_env import getEnv_int
+
+load_dotenv()
 
 
-TLV_DETECTED_POINTS = 1
-TLV_SIDE_INFO = 7
-MAGIC_WORD = bytes([2, 1, 4, 3, 6, 5, 8, 7])
+COM_PORT_CONFIG = os.getenv('COM_PORT_CONFIG', 'COM3')
+COM_PORT_DATA = os.getenv('COM_PORT_DATA', 'COM4')
+CFG_FILE = os.getenv('CFG_FILE')
+FRAMES = getEnv_int('FRAMES', 200)
+BAUDRATE_CFG = getEnv_int('BAUDRATE_CFG', 115200)
+BAUDRATE_DATA = getEnv_int('BAUDRATE_DATA', 1250000)
 
-FRAME_LENGTH_OFFSET = 12
-FRAME_HEADER_SIZE = 40
-POINT_DATA_SIZE = 16
-SIDE_INFO_DATA_SIZE = 4
+TLV_DETECTED_POINTS = getEnv_int('TLV_DETECTED_POINTS', 1)
+TLV_SIDE_INFO = getEnv_int('TLV_SIDE_INFO', 7)
+FRAME_SYNC_WORD = bytes.fromhex(os.getenv('FRAME_SYNC_WORD'))
 
-DEFAULT_CONFIG_PORT = 'COM19'
-DEFAULT_DATA_PORT = 'COM20'
-DEFAULT_CFG_FILE = 'IWRL6844_4T4R_record.cfg'
-DEFAULT_FRAMES = 200
-DEFAULT_BAUDRATE_CFG = 115200
-DEFAULT_BAUDRATE_DATA = 1250000
+FRAME_LENGTH_OFFSET = getEnv_int('FRAME_LENGTH_OFFSET', 12)
+FRAME_HEADER_SIZE = getEnv_int('FRAME_HEADER_SIZE', 40)
+POINT_DATA_SIZE = getEnv_int('POINT_DATA_SIZE', 16)
+SIDE_INFO_DATA_SIZE = getEnv_int('SIDE_INFO_DATA_SIZE', 4)
 
-path_project_root, _, _ = get_abs_dir.get_abs_dir()
-DEFAULT_CFG_PATH = os.path.join(path_project_root, 'get_pointcloud', 'cfg', DEFAULT_CFG_FILE)
-
-file_class = 'test'  # 'standard' 'reference' 'test'
-DEFAULT_OUTPUT_DIR = os.path.join(path_project_root, 'feature', file_class)
+absDir = AbsDir()
+path_project_root = absDir.path_project_root
 
 IntensityMode = str
 
@@ -62,8 +91,8 @@ class CaptureSettings:
 	port_data: str
 	frames: int
 	out_path: str
-	baudrate_cfg: int = DEFAULT_BAUDRATE_CFG
-	baudrate_data: int = DEFAULT_BAUDRATE_DATA
+	baudrate_cfg: int
+	baudrate_data: int
 	intensity_mode: IntensityMode = 'snr_db'
 	snr_norm_mean: float = 20.0
 	snr_norm_std: float = 10.0
@@ -81,61 +110,24 @@ class FrameData:
 	_debug_tlv_bytes: bytes | None = None
 
 
-def resolve_cfg_path(cfg_path: str) -> str:
-	"""支援只輸入檔名時，優先到專案 cfg 目錄找。"""
-	if os.path.isabs(cfg_path) and os.path.isfile(cfg_path):
-		return cfg_path
+# def resolve_cfg_path(cfg_path: str) -> str:
+# 	"""支援只輸入檔名時，優先到專案 cfg 目錄找。"""
+# 	if os.path.isabs(cfg_path) and os.path.isfile(cfg_path):
+# 		return cfg_path
 
-	candidates = [
-		cfg_path,
-		os.path.join(os.path.dirname(__file__), cfg_path),
-		os.path.join(path_project_root, 'get_pointcloud', 'cfg', os.path.basename(cfg_path)),
-	]
+# 	candidates = [
+# 		cfg_path,
+# 		os.path.join(os.path.dirname(__file__), cfg_path),
+# 		os.path.join(path_project_root, 'get_pointcloud', 'cfg', os.path.basename(cfg_path)),
+# 	]
 
-	for candidate in candidates:
-		candidate = os.path.normpath(candidate)
-		if os.path.isfile(candidate):
-			return candidate
+# 	for candidate in candidates:
+# 		candidate = os.path.normpath(candidate)
+# 		if os.path.isfile(candidate):
+# 			return candidate
 
-	return os.path.normpath(os.path.join(path_project_root, 'get_pointcloud', 'cfg', os.path.basename(cfg_path)))
+# 	return os.path.normpath(os.path.join(path_project_root, 'get_pointcloud', 'cfg', os.path.basename(cfg_path)))
 
-
-def resolve_output_path(out_path: str) -> str:
-	"""產生輸出路徑：預設 radar_capture_0.npy，若已存在則遞增。"""
-	if not out_path:
-		base_dir = DEFAULT_OUTPUT_DIR
-		os.makedirs(base_dir, exist_ok=True)
-		out_path = os.path.join(base_dir, 'radar_capture_0.npy')
-
-	out_path = os.path.normpath(out_path)
-	base, ext = os.path.splitext(out_path)
-	if ext == '':
-		ext = '.npy'
-		out_path = base + ext
-
-	if not os.path.isabs(out_path):
-		out_path = os.path.normpath(os.path.join(os.getcwd(), out_path))
-
-	if not os.path.exists(out_path):
-		parent = os.path.dirname(out_path)
-		if parent and not os.path.isdir(parent):
-			os.makedirs(parent, exist_ok=True)
-		return out_path
-
-	name_root = base
-	parts = base.rsplit('_', 1)
-	if len(parts) == 2 and parts[1].isdigit():
-		name_root = parts[0]
-
-	i = 1
-	while True:
-		new_path = f'{name_root}_{i}{ext}'
-		if not os.path.exists(new_path):
-			parent = os.path.dirname(new_path)
-			if parent and not os.path.isdir(parent):
-				os.makedirs(parent, exist_ok=True)
-			return new_path
-		i += 1
 
 
 def find_magic_word(buffer: bytearray, magic_word: bytes) -> int:
@@ -358,7 +350,7 @@ class RadarUARTCapture:
 			if len(self.byte_buffer) > 65536:
 				del self.byte_buffer[:-32768]
 
-			magic_idx = find_magic_word(self.byte_buffer, MAGIC_WORD)
+			magic_idx = find_magic_word(self.byte_buffer, FRAME_SYNC_WORD)
 			if magic_idx < 0:
 				time.sleep(0.005)
 				continue
@@ -369,7 +361,7 @@ class RadarUARTCapture:
 
 			total_len = struct.unpack_from('<I', self.byte_buffer, magic_idx + FRAME_LENGTH_OFFSET)[0]
 			if total_len < FRAME_HEADER_SIZE or total_len > 65535:
-				del self.byte_buffer[:magic_idx + len(MAGIC_WORD)]
+				del self.byte_buffer[:magic_idx + len(FRAME_SYNC_WORD)]
 				continue
 
 			if len(self.byte_buffer) < magic_idx + total_len:
@@ -474,49 +466,56 @@ def capture_to_npy(settings: CaptureSettings) -> int:
 	return 0
 
 
+def auto_capture_path(folder: str, prefix: str = 'radar_capture_', ext: str = '.npy') -> str:
+    idx = 0
+    while True:
+        path = os.path.join(folder, f'{prefix}{idx}{ext}')
+        if not os.path.exists(path):
+            return path
+        idx += 1
+
 def main() -> int:
-	parser = argparse.ArgumentParser(description='MARS UART 擷取並輸出 MARS 論文格式 NPY')
-	parser.add_argument('--cfg', default=DEFAULT_CFG_PATH, help='Config 檔案路徑')
-	parser.add_argument('--port_cfg', default=DEFAULT_CONFIG_PORT, help='Config serial port')
-	parser.add_argument('--port_data', default=DEFAULT_DATA_PORT, help='Data serial port')
-	parser.add_argument('--frames', type=int, default=DEFAULT_FRAMES, help='要擷取的 frame 數，-1 代表持續錄製')
-	parser.add_argument('--out', default='', help='輸出 NPY 檔案路徑')
-	parser.add_argument('--baudrate_cfg', type=int, default=DEFAULT_BAUDRATE_CFG, help='Config serial baudrate')
-	parser.add_argument('--baudrate_data', type=int, default=DEFAULT_BAUDRATE_DATA, help='Data serial baudrate')
-	parser.add_argument(
-		'--intensity_mode',
-		choices=['snr_db', 'snr_raw', 'snr_norm'],
-		default='snr_db',
-		help='第 5 維 intensity 的來源：snr_db=接近論文 Intensity；snr_raw=原始 side-info；snr_norm=給舊模型近似標準化',
-	)
-	parser.add_argument('--snr_norm_mean', type=float, default=20.0, help='snr_norm 模式使用的 mean')
-	parser.add_argument('--snr_norm_std', type=float, default=10.0, help='snr_norm 模式使用的 std')
-	parser.add_argument('--filter_roi', action='store_true', help='啟用舊版 ROI 篩選；預設關閉以符合 MARS 論文保留 out-of-range points')
-	parser.add_argument('--dtype', choices=['float32', 'float64'], default='float64', help='輸出 NPY dtype；模型訓練檔常見為 float64')
-	args = parser.parse_args()
+    parser = argparse.ArgumentParser(description='MARS UART 擷取並輸出 MARS 論文格式 NPY')
+    parser.add_argument('--cfg', default=CFG_FILE, help='Config 檔案名稱')
+    parser.add_argument('--port_cfg', default=COM_PORT_CONFIG, help='Config serial port')
+    parser.add_argument('--port_data', default=COM_PORT_DATA, help='Data serial port')
+    parser.add_argument('--frames', type=int, default=FRAMES, help='要擷取的 frame 數，-1 代表持續錄製')
+    parser.add_argument('--output', default=None, help='輸出 NPY 檔案路徑')
+    parser.add_argument('--baudrate_cfg', type=int, default=BAUDRATE_CFG, help='Config serial baudrate')
+    parser.add_argument('--baudrate_data', type=int, default=BAUDRATE_DATA, help='Data serial baudrate')
+    parser.add_argument(
+        '--intensity_mode',
+        choices=['snr_db', 'snr_raw', 'snr_norm'],
+        default='snr_db',
+        help='第 5 維 intensity 的來源：snr_db=接近論文 Intensity；snr_raw=原始 side-info；snr_norm=給舊模型近似標準化',
+    )
+    parser.add_argument('--snr_norm_mean', type=float, default=20.0, help='snr_norm 模式使用的 mean')
+    parser.add_argument('--snr_norm_std', type=float, default=10.0, help='snr_norm 模式使用的 std')
+    parser.add_argument('--filter_roi', action='store_true', help='啟用舊版 ROI 篩選；預設關閉以符合 MARS 論文保留 out-of-range points')
+    parser.add_argument('--dtype', choices=['float32', 'float64'], default='float64', help='輸出 NPY dtype；模型訓練檔常見為 float64')
+    args = parser.parse_args()
 
-	cfg_path = resolve_cfg_path(args.cfg)
-	if not os.path.isfile(cfg_path):
-		print(f'[ERROR] Config 檔案不存在: {cfg_path}')
-		return 1
+    cfg_path = os.path.join(absDir.path_config, args.cfg)
 
-	out_path = resolve_output_path(args.out)
+    # 自動命名：capture_0.npy, capture_1.npy ...
+    if args.output is None:
+        args.output = auto_capture_path(absDir.get_feature_dir_by_class(FileClass.TEST))
 
-	settings = CaptureSettings(
-		cfg_path=cfg_path,
-		port_cfg=args.port_cfg,
-		port_data=args.port_data,
-		frames=args.frames,
-		out_path=out_path,
-		baudrate_cfg=args.baudrate_cfg,
-		baudrate_data=args.baudrate_data,
-		intensity_mode=args.intensity_mode,
-		snr_norm_mean=args.snr_norm_mean,
-		snr_norm_std=args.snr_norm_std,
-		filter_roi=args.filter_roi,
-		dtype=args.dtype,
-	)
-	return capture_to_npy(settings)
+    settings = CaptureSettings(
+        cfg_path=cfg_path,
+        port_cfg=args.port_cfg,
+        port_data=args.port_data,
+        frames=args.frames,
+        out_path=args.output,
+        baudrate_cfg=args.baudrate_cfg,
+        baudrate_data=args.baudrate_data,
+        intensity_mode=args.intensity_mode,
+        snr_norm_mean=args.snr_norm_mean,
+        snr_norm_std=args.snr_norm_std,
+        filter_roi=args.filter_roi,
+        dtype=args.dtype,
+    )
+    return capture_to_npy(settings)
 
 
 if __name__ == '__main__':

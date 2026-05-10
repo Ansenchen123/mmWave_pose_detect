@@ -4,22 +4,18 @@ mars_predict_demo.py
 ====================
 載入 feature map，用 MARS 預訓練模型推論，顯示互動式姿態估計 demo。
 
-完整工作流程：
-  1. 點雲資料 (.mat)
-     ↓
-  2. pc_to_featuremap_v2_mars.py   → feature map (.npy)
-     ↓
-  3. mars_predict_demo.py          → 姿態推論 + 視覺化
-
 用法：
   # 顯示預設檔案（reference 類別）
   python mars_predict_demo.py
 
+  # --file_class 0|1|2 分別對應 standard|reference|test 類別
+  python mars_predict_demo.py --file_class 1
+
   # 指定自訂 feature map
-  python mars_predict_demo.py --input feature/standard_pose/mars_pointcloud_0506.npy
+  python mars_predict_demo.py --input mars_pointcloud_0506.npy --file_class 0
 
   # 指定模型路徑
-  python mars_predict_demo.py --input feature/reference/*.npy --model model/MARS.h5
+  python mars_predict_demo.py --input mars_pointcloud_0506.npy --model MARS.h5
 
   # 儲存推論結果
   python mars_predict_demo.py --input feature/reference/mars_pointcloud_0506.npy --save_pred pred_output.npy
@@ -77,12 +73,15 @@ try:
 except ImportError:
     from tensorflow.keras.models import load_model
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.AbsDir import FileClass
 
-path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
-file_class = 'test' # 'standard' 'reference' 'test'
-deature_name = 'radar_capture_5.npy'
-deature_name = deature_name if deature_name.endswith('.npy') else f'{deature_name}.npy'
+from util.find_file import find_default_feature_file
+
+
+FILE_CLASS = FileClass.TEST
+FEATURE_FILE = 'radar_capture_5'
+
 
 # 軸範圍：與 MARS 原版 demo 完全一致（從論文截圖量測）
 PC_X  = (-1.0, 1.0)
@@ -283,16 +282,45 @@ class MARSPredictDemo:
         plt.show()
 
 
-def main():    
+def main():
+    absDir = AbsDir()
+    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+
+    global FEATURE_FILE
+    FEATURE_FILE = FEATURE_FILE if FEATURE_FILE.endswith('.npy') else f'{FEATURE_FILE}.npy'
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input',     default=None)
-    parser.add_argument('--model',     default='model/MARS.h5')
+    parser.add_argument('--input', default=None)
+    parser.add_argument('--file_class', default=None, help='檔案類別 {0: standard, 1: reference, 2: test}')
+    parser.add_argument('--model', default=os.path.join(absDir.path_model, 'MARS.h5'))
     parser.add_argument('--save_pred', default=None)
+    parser.add_argument('--auto', default=False)
     args = parser.parse_args()
 
-    if args.input is None:
-        args.input = os.path.join(path_project_root, path_feature, file_class, deature_name)
-    print(f'[輸入] {args.input}, {"存在 " if os.path.isfile(args.input) else "不存在"}')
+    if args.file_class is None:
+        args.file_class = FILE_CLASS
+    elif args.file_class.isdigit() and args.file_class in ['0', '1', '2']:
+        args.file_class = FileClass.from_number(args.file_class)
+    else:
+        print(f'[WARNING] 無效的 file_class \"{args.file_class}\"，使用預設 {FILE_CLASS}')
+        args.file_class = FILE_CLASS
+    print(f'[INFO] 使用的 file_class: {args.file_class}')
+        
+    if args.auto == 'True':
+        args.input = find_default_feature_file(path_feature_dir)
+        if args.input is None:
+            print(f'[ERROR] 在 \"{path_feature_dir}\" 找不到任何 .npy 檔案')
+            os._exit(0)
+    else:
+        if args.input is None:
+            args.input = os.path.join(absDir.get_feature_file_by_class(args.file_class), FEATURE_FILE)
+            if not os.path.isfile(args.input):
+                print(f'[ERROR] 預設檔案 \"{args.input}\" 不存在')
+                os._exit(0)
+        args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), args.input)
+        if  not os.path.isfile(args.input):
+            print(f'[WARNING] 輸入檔案 \"{args.input}\" 不存在')
+            os._exit(0)
 
     fmaps = np.load(args.input).astype(np.float32)
     print(f'[載入] {args.input}  shape={fmaps.shape}')

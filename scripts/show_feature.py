@@ -43,13 +43,13 @@ import matplotlib.gridspec as gridspec
 from matplotlib.widgets import Slider
 from mpl_toolkits.mplot3d import Axes3D  # noqa
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.AbsDir import FileClass
 
+from util.find_file import find_default_feature_file
 
-
-file_class = 'test' # 'standard' 'reference' 'test'
-FEATURE_DIR = os.path.normpath(f'feature\{file_class}')
-FEATURE_FILE = 'radar_capture_5'
+FILE_CLASS = FileClass.TEST
+FEATURE_FILE = 'mars_pointcloud_0506_Both_upper_limb_extension.npy'
 
 
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
@@ -66,34 +66,6 @@ def fmap_to_pts(fmap):
     pts = fmap.reshape(-1, 5)
     return pts[np.any(pts != 0, axis=1)]
 
-
-def find_default_feature_file(feature_dir):
-    """優先找最新的 radar_capture_*.npy，找不到就回退到 feature_dir 內最新的 .npy。"""
-    if not os.path.isdir(feature_dir):
-        return None
-
-    preferred = sorted(
-        [
-            os.path.join(feature_dir, name)
-            for name in os.listdir(feature_dir)
-            if name.startswith('radar_capture_') and name.endswith('.npy')
-        ],
-        key=os.path.getmtime,
-        reverse=True,
-    )
-    if preferred:
-        return preferred[0]
-
-    fallback = sorted(
-        [
-            os.path.join(feature_dir, name)
-            for name in os.listdir(feature_dir)
-            if name.endswith('.npy')
-        ],
-        key=os.path.getmtime,
-        reverse=True,
-    )
-    return fallback[0] if fallback else None
 
 
 class PointCloudViewer:
@@ -176,18 +148,44 @@ class PointCloudViewer:
         plt.show()
 
 
-def main():
-    path_project_root, path_feature, path_pointcloud = get_abs_dir.get_abs_dir()
+def main():    
     parser = argparse.ArgumentParser(description='顯示雷達點雲')
-    parser.add_argument('--input', default=None,
-                        help='輸入 .npy 檔案名稱')
+    parser.add_argument('--input', default=None, help='輸入 .npy 檔案名稱')
+    parser.add_argument('--auto', default=False, help='自動尋找最新的 radar_capture_*.npy')
+    parser.add_argument('--file_class', default=None, help='檔案類別 {0: standard, 1: reference, 2: test}')
     args = parser.parse_args()
-    if (args.input is None) or (not os.path.isfile(args.input)):
-        default_feature = find_default_feature_file(os.path.join(path_project_root, FEATURE_DIR))
-        args.input = default_feature if default_feature is not None else os.path.join(path_project_root, FEATURE_DIR, FEATURE_FILE)
+    
+    absDir = AbsDir()
+    path_project_root = absDir.path_project_root
+    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+    
+    if args.file_class is None:
+        args.file_class = FILE_CLASS
+    elif args.file_class.isdigit() and args.file_class in ['0', '1', '2']:
+        args.file_class = FileClass.from_number(args.file_class)
+    else:
+        print(f'[WARNING] 無效的 file_class \"{args.file_class}\"，使用預設 {FILE_CLASS}')
+        args.file_class = FILE_CLASS
+    print(f'[INFO] 使用的 file_class: {args.file_class}')
+        
+    
+    if args.auto == 'True':
+        args.input = find_default_feature_file(path_feature_dir)
+        if args.input is None:
+            print(f'[ERROR] 在 \"{path_feature_dir}\" 找不到任何 .npy 檔案')
+            os._exit(0)
+    else:
+        if args.input is None:
+            args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), FEATURE_FILE)
+            if not os.path.isfile(args.input):
+                print(f'[ERROR] 預設檔案 \"{args.input}\" 不存在')
+                os._exit(0)
+        args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), FEATURE_FILE)
+        if  not os.path.isfile(args.input):
+            print(f'[WARNING] 輸入檔案 \"{args.input}\" 不存在')
+            os._exit(0)
+            
     print(f'[輸入] {args.input}')
-
-    print(f'[載入] {args.input}')
     fmaps = np.load(args.input).astype(np.float32)
     print(f'Shape: {fmaps.shape}')
 

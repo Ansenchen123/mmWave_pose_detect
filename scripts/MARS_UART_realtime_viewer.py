@@ -17,46 +17,51 @@ import sys
 import time
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
 import numpy as np
 import serial
 import matplotlib.pyplot as plt
 from matplotlib import cm
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.AbsDir import FileClass
+
+from util.get_env import getEnv_int
 
 
-TLV_DETECTED_POINTS = 1
-TLV_SIDE_INFO = 7
-MAGIC_WORD = bytes([2, 1, 4, 3, 6, 5, 8, 7])
+load_dotenv()
 
-FRAME_LENGTH_OFFSET = 12
-FRAME_HEADER_SIZE = 40
-POINT_DATA_SIZE = 16
-SIDE_INFO_DATA_SIZE = 4
+TLV_DETECTED_POINTS = getEnv_int('TLV_DETECTED_POINTS', 1)
+TLV_SIDE_INFO = getEnv_int('TLV_SIDE_INFO', 7)
+FRAME_SYNC_WORD = bytes.fromhex(os.getenv('FRAME_SYNC_WORD'))
 
-DEFAULT_CONFIG_PORT = 19
-DEFAULT_CONFIG_PORT = f'COM{DEFAULT_CONFIG_PORT}'
-DEFAULT_DATA_PORT = 20
-DEFAULT_DATA_PORT = f'COM{DEFAULT_DATA_PORT}'
+FRAME_LENGTH_OFFSET = getEnv_int('FRAME_LENGTH_OFFSET', 12)
+FRAME_HEADER_SIZE = getEnv_int('FRAME_HEADER_SIZE', 40)
+POINT_DATA_SIZE = getEnv_int('POINT_DATA_SIZE', 16)
+SIDE_INFO_DATA_SIZE = getEnv_int('SIDE_INFO_DATA_SIZE', 4)
+
+DEFAULT_CONFIG_PORT = os.getenv('COM_PORT_CONFIG', 'COM3')
+DEFAULT_DATA_PORT = os.getenv('COM_PORT_DATA', 'COM4')
 # DEFAULT_CFG_FILE = 'IWRL6844_4T4R_realtime.cfg'
-DEFAULT_CFG_FILE = 'IWRL6844_4T4R_record.cfg'
+DEFAULT_CFG_FILE = os.getenv('CFG_FILE', 'IWRL6844_4T4R_record.cfg')
 DEFAULT_FRAMES = -1		# 預設 -1 代表無限擷取，直到使用者中斷 (Ctrl+C)
-DEFAULT_BAUDRATE_CFG = 115200
-DEFAULT_BAUDRATE_DATA = 1250000
+DEFAULT_BAUDRATE_CFG = getEnv_int('DEFAULT_BAUDRATE_CFG', 115200)
+DEFAULT_BAUDRATE_DATA = getEnv_int('DEFAULT_BAUDRATE_DATA', 1250000)
+
+abs_dir = AbsDir()
+path_project_root = abs_dir.path_project_root
+DEFAULT_CFG_PATH = os.path.join(path_project_root, 'cfg', DEFAULT_CFG_FILE)
 
 
-path_project_root, _, _ = get_abs_dir.get_abs_dir()
-DEFAULT_CFG_PATH = os.path.join(path_project_root, 'get_pointcloud', 'cfg', DEFAULT_CFG_FILE)
-
-
-@dataclass(frozen=True)
+@dataclass
 class CaptureSettings:
 	cfg_path: str
 	port_cfg: str
 	port_data: str
 	frames: int
-	baudrate_cfg: int = DEFAULT_BAUDRATE_CFG
-	baudrate_data: int = DEFAULT_BAUDRATE_DATA
+	baudrate_cfg: int
+	baudrate_data: int
 
 
 @dataclass
@@ -251,7 +256,7 @@ class RadarUARTCapture:
 			if len(self.byte_buffer) > 65536:
 				del self.byte_buffer[:-32768]
 
-			magic_idx = find_magic_word(self.byte_buffer, MAGIC_WORD)
+			magic_idx = find_magic_word(self.byte_buffer, FRAME_SYNC_WORD)
 			if magic_idx < 0:
 				time.sleep(0.005)
 				continue
