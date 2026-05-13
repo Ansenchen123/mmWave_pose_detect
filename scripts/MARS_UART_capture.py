@@ -44,39 +44,45 @@ from __future__ import annotations
 
 import argparse
 import os
-import struct
 import sys
-import time
 from dataclasses import dataclass
-
-from dotenv import load_dotenv
+from dataclasses import replace
 
 import numpy as np
-import serial
 
+from pointcloud_pyqtgraph import init_plot
+from pointcloud_pyqtgraph import process_plot_events
+from pointcloud_pyqtgraph import update_plot_points
+from radar_uart import filter_points
+from radar_uart import PointFilterSettings
+from radar_uart import point_filter_settings_from_config
+from radar_uart import RadarUARTCapture
+from radar_uart import RadarUARTSettings
+from radar_uart import select_mars_points
 from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
+from util.radar_config import cfg_get
+from util.radar_config import cfg_range
+from util.radar_config import load_radar_config
+from util.radar_config import resolve_cfg_path
 
-from util.get_env import getEnv_int
+RADAR_CONFIG = load_radar_config()
+POINT_FILTER_SETTINGS = point_filter_settings_from_config(RADAR_CONFIG)
 
-load_dotenv()
-
-
-COM_PORT_CONFIG = os.getenv('COM_PORT_CONFIG', 'COM3')
-COM_PORT_DATA = os.getenv('COM_PORT_DATA', 'COM4')
-CFG_FILE = os.getenv('CFG_FILE')
-FRAMES = getEnv_int('FRAMES', 200)
-BAUDRATE_CFG = getEnv_int('BAUDRATE_CFG', 115200)
-BAUDRATE_DATA = getEnv_int('BAUDRATE_DATA', 1250000)
-
-TLV_DETECTED_POINTS = getEnv_int('TLV_DETECTED_POINTS', 1)
-TLV_SIDE_INFO = getEnv_int('TLV_SIDE_INFO', 7)
-FRAME_SYNC_WORD = bytes.fromhex(os.getenv('FRAME_SYNC_WORD'))
-
-FRAME_LENGTH_OFFSET = getEnv_int('FRAME_LENGTH_OFFSET', 12)
-FRAME_HEADER_SIZE = getEnv_int('FRAME_HEADER_SIZE', 40)
-POINT_DATA_SIZE = getEnv_int('POINT_DATA_SIZE', 16)
-SIDE_INFO_DATA_SIZE = getEnv_int('SIDE_INFO_DATA_SIZE', 4)
+COM_PORT_CONFIG = str(cfg_get(RADAR_CONFIG, 'radar', 'config_port', default='COM3'))
+COM_PORT_DATA = str(cfg_get(RADAR_CONFIG, 'radar', 'data_port', default='COM4'))
+CFG_FILE = str(cfg_get(RADAR_CONFIG, 'radar', 'cfg_file', default='IWRL6844_4T4R_record.cfg'))
+FRAMES = int(cfg_get(RADAR_CONFIG, 'radar', 'frames', default=200))
+BAUDRATE_CFG = int(cfg_get(RADAR_CONFIG, 'radar', 'baudrate_cfg', default=115200))
+BAUDRATE_DATA = int(cfg_get(RADAR_CONFIG, 'radar', 'baudrate_data', default=1250000))
+INTENSITY_MODE = str(cfg_get(RADAR_CONFIG, 'point_output', 'intensity_mode', default='snr_db'))
+SNR_NORM_MEAN = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_mean', default=20.0))
+SNR_NORM_STD = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_std', default=10.0))
+SIDE_INFO_DB_LIMIT = float(cfg_get(RADAR_CONFIG, 'point_output', 'side_info_db_limit', default=100.0))
+MAX_POINTS = int(cfg_get(RADAR_CONFIG, 'feature_map', 'max_points', default=64))
+FEATURE_DTYPE = str(cfg_get(RADAR_CONFIG, 'feature_map', 'dtype', default='float64'))
+TRUNCATE_BEFORE_SORT = bool(cfg_get(RADAR_CONFIG, 'feature_map', 'truncate_before_sort', default=True))
+DISPLAY_X, DISPLAY_Y, DISPLAY_Z = cfg_range(RADAR_CONFIG, 'point_cloud')
 
 absDir = AbsDir()
 path_project_root = absDir.path_project_root
@@ -86,28 +92,25 @@ IntensityMode = str
 
 @dataclass(frozen=True)
 class CaptureSettings:
-	cfg_path: str
-	port_cfg: str
-	port_data: str
-	frames: int
-	out_path: str
-	baudrate_cfg: int
-	baudrate_data: int
-	intensity_mode: IntensityMode = 'snr_db'
-	snr_norm_mean: float = 20.0
-	snr_norm_std: float = 10.0
-	filter_roi: bool = False
-	dtype: str = 'float64'
-
-
-@dataclass
-class FrameData:
-	frame_number: int
-	total_length: int
-	num_detected_objects: int
-	num_tlv: int
-	points: np.ndarray
-	_debug_tlv_bytes: bytes | None = None
+    cfg_path: str
+    port_cfg: str
+    port_data: str
+    frames: int
+    out_path: str
+    send_config: bool
+    baudrate_cfg: int
+    baudrate_data: int
+    intensity_mode: IntensityMode = 'snr_db'
+    snr_norm_mean: float = 20.0
+    snr_norm_std: float = 10.0
+    side_info_db_limit: float = 100.0
+    point_filter: PointFilterSettings = POINT_FILTER_SETTINGS
+    max_points: int = 64
+    truncate_before_sort: bool = True
+    display_ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = (DISPLAY_X, DISPLAY_Y, DISPLAY_Z)
+    show_plot: bool = True
+    plot_hz: float = 10.0
+    dtype: str = 'float64'
 
 
 # def resolve_cfg_path(cfg_path: str) -> str:
@@ -128,342 +131,141 @@ class FrameData:
 
 # 	return os.path.normpath(os.path.join(path_project_root, 'get_pointcloud', 'cfg', os.path.basename(cfg_path)))
 
+def frame_to_featuremap(frame: np.ndarray, max_points: int = 64, truncate_before_sort: bool = True, dtype=np.float64) -> np.ndarray:
+    """依 MARS 論文產生 (8,8,5) feature map。
 
+    MARS 論文流程：
+    - 每點 5 維：[x, y, z, Doppler, intensity]
+    - 每 frame 統一為 64 x 5；不足補零，超過截斷
+    - 保留雷達 frame 中前 64 個 reflected points
+    - 依 x -> y -> z 升冪排序
+    - row-major reshape 成 8 x 8 x 5
 
-def find_magic_word(buffer: bytearray, magic_word: bytes) -> int:
-	return buffer.find(magic_word)
+    ROI 與有效點篩選已由 shared radar_uart.filter_points() 控制。
+    """
+    if frame is None or frame.shape[0] == 0:
+        return np.zeros((8, 8, 5), dtype=dtype)
 
+    frame = frame.astype(dtype, copy=False)
 
-def side_info_to_db(raw_value: int) -> float:
-	"""將 TLV side-info raw int16 轉成 dB。
+    frame = select_mars_points(frame, max_points=max_points, truncate_before_sort=truncate_before_sort)
 
-	TI OOB side-info 通常是 1 LSB = 0.1 dB；若換算後明顯過大，
-	使用 0.01 dB/LSB 修正，避免 167 dB 這類不合理顯示。
-	"""
-	value_db = float(raw_value) * 0.1
-	if abs(value_db) > 100.0:
-		value_db = float(raw_value) * 0.01
-	return value_db
+    # 不足補零。
+    if frame.shape[0] < max_points:
+        pad = np.zeros((max_points - frame.shape[0], 5), dtype=dtype)
+        frame = np.vstack((frame, pad))
 
-
-def convert_intensity(snr_raw: int, settings: CaptureSettings) -> float:
-	"""把 side-info SNR 轉成第 5 維 intensity channel。"""
-	if settings.intensity_mode == 'snr_raw':
-		return float(snr_raw)
-
-	snr_db = side_info_to_db(snr_raw)
-	if settings.intensity_mode == 'snr_norm':
-		if settings.snr_norm_std == 0:
-			raise ValueError('snr_norm_std cannot be 0')
-		return (snr_db - settings.snr_norm_mean) / settings.snr_norm_std
-
-	return snr_db
-
-
-def parse_frame(frame_bytes: bytes, settings: CaptureSettings) -> FrameData | None:
-	"""解析完整 frame，回傳點雲與 frame header 資訊。"""
-	if len(frame_bytes) < FRAME_HEADER_SIZE:
-		return None
-
-	_first_tlv_bytes = None
-	offset = 8  # magic word
-	try:
-		offset += 4  # version
-		total_length = struct.unpack_from('<I', frame_bytes, offset)[0]
-		offset += 4  # totalLen
-		offset += 4  # platform
-		frame_number = struct.unpack_from('<I', frame_bytes, offset)[0]
-		offset += 4  # frameNumber
-		offset += 4  # timeCPUCycles
-		num_detected_objects = struct.unpack_from('<I', frame_bytes, offset)[0]
-		offset += 4
-		num_tlv = struct.unpack_from('<I', frame_bytes, offset)[0]
-		offset += 4
-		offset += 4  # subFrameNumber
-	except struct.error:
-		return None
-
-	if num_detected_objects == 0:
-		return FrameData(
-			frame_number=frame_number,
-			total_length=total_length,
-			num_detected_objects=0,
-			num_tlv=num_tlv,
-			points=np.zeros((0, 5), dtype=np.float64),
-		)
-
-	points = np.zeros((num_detected_objects, 5), dtype=np.float64)
-
-	for _ in range(num_tlv):
-		if offset + 8 > len(frame_bytes):
-			break
-
-		tlv_type, tlv_length = struct.unpack_from('<II', frame_bytes, offset)
-		offset += 8
-		tlv_end = offset + tlv_length
-
-		if tlv_type == TLV_DETECTED_POINTS:
-			for point_index in range(num_detected_objects):
-				if offset + POINT_DATA_SIZE > len(frame_bytes):
-					break
-				if _first_tlv_bytes is None and point_index == 0:
-					_first_tlv_bytes = bytes(frame_bytes[offset:offset + POINT_DATA_SIZE])
-				points[point_index, 0:4] = struct.unpack_from('<ffff', frame_bytes, offset)
-				offset += POINT_DATA_SIZE
-
-		elif tlv_type == TLV_SIDE_INFO:
-			for point_index in range(num_detected_objects):
-				if offset + SIDE_INFO_DATA_SIZE > len(frame_bytes):
-					break
-				snr_raw, _noise_raw = struct.unpack_from('<hh', frame_bytes, offset)
-				offset += SIDE_INFO_DATA_SIZE
-				points[point_index, 4] = convert_intensity(snr_raw, settings)
-
-		else:
-			offset = tlv_end
-
-		if offset < tlv_end:
-			offset = tlv_end
-
-	return FrameData(
-		frame_number=frame_number,
-		total_length=total_length,
-		num_detected_objects=num_detected_objects,
-		num_tlv=num_tlv,
-		points=points,
-		_debug_tlv_bytes=_first_tlv_bytes,
-	)
-
-
-def frame_to_featuremap(frame: np.ndarray, max_points: int = 64, filter_roi: bool = False, dtype=np.float64) -> np.ndarray:
-	"""依 MARS 論文產生 (8,8,5) feature map。
-
-	MARS 論文流程：
-	- 每點 5 維：[x, y, z, Doppler, intensity]
-	- 每 frame 統一為 64 x 5；不足補零，超過截斷
-	- 依 x -> y -> z 升冪排序
-	- row-major reshape 成 8 x 8 x 5
-
-	預設不做 ROI filtering；這樣 out-of-range / ghost points 也會保留。
-	"""
-	if frame is None or frame.shape[0] == 0:
-		return np.zeros((8, 8, 5), dtype=dtype)
-
-	frame = frame.astype(dtype, copy=False)
-
-	# 移除完整零列；有效點中若某一欄為 0 不會被移除。
-	frame = frame[np.any(frame != 0, axis=1)]
-
-	# 舊版相容選項：預設關閉。MARS 論文實驗中 out-of-range points 會保留。
-	if filter_roi and frame.shape[0] > 0:
-		mask = (
-			(frame[:, 0] > -1.0) & (frame[:, 0] < 1.0) &
-			(frame[:, 1] > 0.0) & (frame[:, 1] < 3.0) &
-			(frame[:, 2] > -1.0) & (frame[:, 2] < 1.0)
-		)
-		frame = frame[mask]
-
-	# 依 x -> y -> z 升冪排序。np.lexsort 最後一個 key 是 primary key。
-	if frame.shape[0] > 0:
-		frame = frame[np.lexsort((frame[:, 2], frame[:, 1], frame[:, 0]))]
-
-	# 截斷到 64 points。
-	if frame.shape[0] > max_points:
-		frame = frame[:max_points]
-
-	# 不足補零。
-	if frame.shape[0] < max_points:
-		pad = np.zeros((max_points - frame.shape[0], 5), dtype=dtype)
-		frame = np.vstack((frame, pad))
-
-	return frame.reshape(8, 8, 5)
-
-
-class RadarUARTCapture:
-	def __init__(self, settings: CaptureSettings):
-		self.settings = settings
-		self.cfg_port = serial.Serial(
-			settings.port_cfg,
-			baudrate=settings.baudrate_cfg,
-			timeout=0.1,
-		)
-		self.data_port = serial.Serial(
-			settings.port_data,
-			baudrate=settings.baudrate_data,
-			timeout=0.1,
-		)
-		self.byte_buffer = bytearray()
-
-	def _send_cli(self, cmd: str, delay: float = 0.12) -> str:
-		if not cmd.endswith('\n'):
-			cmd += '\n'
-		self.cfg_port.write(cmd.encode('utf-8'))
-		self.cfg_port.flush()
-		time.sleep(delay)
-		resp = b''
-		while self.cfg_port.in_waiting:
-			resp += self.cfg_port.read(self.cfg_port.in_waiting)
-			time.sleep(0.02)
-		return resp.decode(errors='ignore').strip()
-
-	def send_config(self) -> None:
-		print('[INFO] 送出 config...')
-		self.cfg_port.reset_input_buffer()
-		self.cfg_port.reset_output_buffer()
-		self.data_port.reset_input_buffer()
-		self.data_port.reset_output_buffer()
-		self.byte_buffer.clear()
-
-		resp = self._send_cli('sensorStop 0', delay=0.8)
-		if resp:
-			print('[CLI]', resp)
-
-		with open(self.settings.cfg_path, 'r', encoding='utf-8') as file_handle:
-			for line in file_handle:
-				line = line.strip()
-				if not line or line.startswith('%') or line.startswith('#'):
-					continue
-
-				# 前面已經送過 sensorStop，避免重複。
-				if line.startswith('sensorStop'):
-					continue
-
-				delay = 1.0 if line.startswith('sensorStart') else 0.12
-				resp = self._send_cli(line, delay=delay)
-				print(f'  [CFG] {line}')
-				if resp:
-					print('[CLI]', resp)
-				if 'error' in resp.lower():
-					print(f'[WARN] 這行 cfg 可能失敗: {line}')
-
-		time.sleep(0.5)
-		self.data_port.reset_input_buffer()
-		self.byte_buffer.clear()
-		print('[INFO] Config 送出完成。\n')
-
-	def read_frame(self) -> FrameData | None:
-		while True:
-			n_avail = self.data_port.in_waiting
-			if n_avail > 0:
-				self.byte_buffer.extend(self.data_port.read(n_avail))
-
-			if len(self.byte_buffer) > 65536:
-				del self.byte_buffer[:-32768]
-
-			magic_idx = find_magic_word(self.byte_buffer, FRAME_SYNC_WORD)
-			if magic_idx < 0:
-				time.sleep(0.005)
-				continue
-
-			if len(self.byte_buffer) < magic_idx + FRAME_LENGTH_OFFSET + 4:
-				time.sleep(0.005)
-				continue
-
-			total_len = struct.unpack_from('<I', self.byte_buffer, magic_idx + FRAME_LENGTH_OFFSET)[0]
-			if total_len < FRAME_HEADER_SIZE or total_len > 65535:
-				del self.byte_buffer[:magic_idx + len(FRAME_SYNC_WORD)]
-				continue
-
-			if len(self.byte_buffer) < magic_idx + total_len:
-				time.sleep(0.005)
-				continue
-
-			frame_bytes = bytes(self.byte_buffer[magic_idx:magic_idx + total_len])
-			del self.byte_buffer[:magic_idx + total_len]
-
-			frame_data = parse_frame(frame_bytes, self.settings)
-			if frame_data is not None:
-				return frame_data
-
-	def stop_sensor(self) -> None:
-		try:
-			if self.cfg_port and self.cfg_port.is_open:
-				resp = self._send_cli('sensorStop 0', delay=0.8)
-				if resp:
-					print('[INFO] sensorStop 回應:', resp)
-		except Exception as exc:
-			print(f'[WARN] sensorStop 送出失敗: {exc}')
-
-	def close(self) -> None:
-		try:
-			self.stop_sensor()
-		finally:
-			try:
-				if self.data_port and self.data_port.is_open:
-					self.data_port.reset_input_buffer()
-					self.data_port.close()
-			finally:
-				if self.cfg_port and self.cfg_port.is_open:
-					self.cfg_port.close()
+    return frame.reshape(8, 8, 5)
 
 
 def capture_to_npy(settings: CaptureSettings) -> int:
-	print(f'[INFO] Config 檔案: {settings.cfg_path}')
-	print(f'[INFO] Config serial port: {settings.port_cfg}')
-	print(f'[INFO] Data serial port: {settings.port_data}')
-	print(f'[INFO] 輸出檔案: {settings.out_path}')
-	print(f'[INFO] intensity_mode: {settings.intensity_mode}')
-	print(f'[INFO] filter_roi: {settings.filter_roi}')
-	print(f'[INFO] dtype: {settings.dtype}')
+    print(f'[INFO] Config 檔案: {settings.cfg_path}')
+    print(f'[INFO] Config serial port: {settings.port_cfg}')
+    print(f'[INFO] Data serial port: {settings.port_data}')
+    print(f'[INFO] send_config: {settings.send_config}')
+    print(f'[INFO] 輸出檔案: {settings.out_path}')
+    print(f'[INFO] intensity_mode: {settings.intensity_mode}')
+    print(f'[INFO] filter_roi: {settings.point_filter.roi_enabled}')
+    print(f'[INFO] show_plot: {settings.show_plot}')
+    if settings.show_plot:
+        print(f'[INFO] display_ranges: X{settings.display_ranges[0]} Y{settings.display_ranges[1]} Z{settings.display_ranges[2]}')
+        print(f'[INFO] plot_backend: pyqtgraph OpenGL, plot_hz: {settings.plot_hz}')
+    print(f'[INFO] dtype: {settings.dtype}')
 
-	dtype = np.float64 if settings.dtype == 'float64' else np.float32
-	fmaps: list[np.ndarray] = []
-	capture = None
+    dtype = np.float64 if settings.dtype == 'float64' else np.float32
+    fmaps: list[np.ndarray] = []
+    capture = None
+    plot = None
 
-	try:
-		capture = RadarUARTCapture(settings)
-		capture.send_config()
+    try:
+        uart_settings = RadarUARTSettings(
+            cfg_path=settings.cfg_path,
+            port_cfg=settings.port_cfg,
+            port_data=settings.port_data,
+            baudrate_cfg=settings.baudrate_cfg,
+            baudrate_data=settings.baudrate_data,
+            intensity_mode=settings.intensity_mode,
+            snr_norm_mean=settings.snr_norm_mean,
+            snr_norm_std=settings.snr_norm_std,
+            side_info_db_limit=settings.side_info_db_limit,
+        )
+        capture = RadarUARTCapture(uart_settings)
+        if settings.send_config:
+            capture.send_config()
+        else:
+            capture.data_port.reset_input_buffer()
+            capture.byte_buffer.clear()
+            print('[INFO] 略過送出 config，直接開始讀取 data serial port。')
 
-		print(f'[INFO] 開始錄製，目標 {settings.frames} frames。')
+        if settings.show_plot:
+            plot = init_plot(settings.display_ranges, title='MARS UART Capture 3D Preview')
 
-		frame_count = 0
-		while settings.frames < 0 or frame_count < settings.frames:
-			frame_data = capture.read_frame()
-			if frame_data is None:
-				continue
+        print(f'[INFO] 開始錄製，目標 {settings.frames} frames。')
 
-			frame_count += 1
-			valid_points = frame_data.points[np.any(frame_data.points != 0, axis=1)]
+        frame_count = 0
+        plot_interval_s = 1.0 / settings.plot_hz if settings.plot_hz > 0 else 0.0
+        next_plot_at = 0.0
+        while settings.frames < 0 or frame_count < settings.frames:
+            frame_data = capture.read_frame(timeout_s=0.02 if settings.show_plot else None)
+            if frame_data is None:
+                if plot is not None:
+                    process_plot_events(plot)
+                continue
 
-			fmap = frame_to_featuremap(
-				valid_points,
-				max_points=64,
-				filter_roi=settings.filter_roi,
-				dtype=dtype,
-			)
-			fmaps.append(fmap.astype(dtype, copy=False))
+            frame_count += 1
+            valid_points = filter_points(frame_data.points, settings.point_filter)
+            valid_points = select_mars_points(
+                valid_points,
+                max_points=settings.max_points,
+                truncate_before_sort=settings.truncate_before_sort,
+            )
+            
+            fmap = frame_to_featuremap(
+                valid_points,
+                max_points=settings.max_points,
+                truncate_before_sort=settings.truncate_before_sort,
+                dtype=dtype,
+            )
+            fmaps.append(fmap.astype(dtype, copy=False))
 
-			if frame_count % 10 == 0:
-				nonzero_points = np.count_nonzero(np.any(fmap.reshape(-1, 5) != 0, axis=1))
-				print(f'[INFO] 已擷取 {frame_count} frames, 本幀有效點 {nonzero_points}, 累積 featuremap {len(fmaps)}')
+            if plot is not None:
+                import time
+                now = time.monotonic()
+                if now >= next_plot_at:
+                    update_plot_points(valid_points, plot, settings.display_ranges)
+                    next_plot_at = now + plot_interval_s
 
-	except KeyboardInterrupt:
-		print('\n[INFO] 使用者中斷。')
-	finally:
-		if capture is not None:
-			capture.close()
+            if frame_count % 10 == 0:
+                nonzero_points = np.count_nonzero(np.any(fmap.reshape(-1, 5) != 0, axis=1))
+                print(f'[INFO] 已擷取 {frame_count} frames, 本幀有效點 {nonzero_points}, 累積 featuremap {len(fmaps)}')
 
-	if fmaps:
-		captured = np.stack(fmaps).astype(dtype, copy=False)
-	else:
-		captured = np.zeros((0, 8, 8, 5), dtype=dtype)
+    except KeyboardInterrupt:
+        print('\n[INFO] 使用者中斷。')
+    finally:
+        if capture is not None:
+            capture.close()
 
-	np.save(settings.out_path, captured)
-	print(f'[INFO] 已儲存 featuremap NPY: {settings.out_path}')
-	print(f'[INFO] 資料維度: {captured.shape} (frames,8,8,5)')
-	print(f'[INFO] dtype: {captured.dtype}')
+    if fmaps:
+        captured = np.stack(fmaps).astype(dtype, copy=False)
+    else:
+        captured = np.zeros((0, 8, 8, 5), dtype=dtype)
 
-	if captured.size > 0:
-		for ch in range(captured.shape[-1]):
-			data = captured[..., ch]
-			print(
-				f'[INFO] channel {ch}: '
-				f'min={np.min(data):.6f}, max={np.max(data):.6f}, '
-				f'mean={np.mean(data):.6f}, std={np.std(data):.6f}, '
-				f'nonzero={np.count_nonzero(data)}'
-			)
+    np.save(settings.out_path, captured)
+    print(f'[INFO] 已儲存 featuremap NPY: {settings.out_path}')
+    print(f'[INFO] 資料維度: {captured.shape} (frames,8,8,5)')
+    print(f'[INFO] dtype: {captured.dtype}')
 
-	return 0
+    if captured.size > 0:
+        for ch in range(captured.shape[-1]):
+            data = captured[..., ch]
+            print(
+                f'[INFO] channel {ch}: '
+                f'min={np.min(data):.6f}, max={np.max(data):.6f}, '
+                f'mean={np.mean(data):.6f}, std={np.std(data):.6f}, '
+                f'nonzero={np.count_nonzero(data)}'
+            )
+
+    return 0
 
 
 def auto_capture_path(folder: str, prefix: str = 'radar_capture_', ext: str = '.npy') -> str:
@@ -481,21 +283,27 @@ def main() -> int:
     parser.add_argument('--port_data', default=COM_PORT_DATA, help='Data serial port')
     parser.add_argument('--frames', type=int, default=FRAMES, help='要擷取的 frame 數，-1 代表持續錄製')
     parser.add_argument('--output', default=None, help='輸出 NPY 檔案路徑')
+    parser.add_argument('--send_config', action='store_true', default=True, help='送出 radar cfg；預設啟用')
+    parser.add_argument('--no_send_config', action='store_false', dest='send_config', help='不送出 radar cfg，直接擷取目前 radar 輸出的資料')
     parser.add_argument('--baudrate_cfg', type=int, default=BAUDRATE_CFG, help='Config serial baudrate')
     parser.add_argument('--baudrate_data', type=int, default=BAUDRATE_DATA, help='Data serial baudrate')
     parser.add_argument(
         '--intensity_mode',
         choices=['snr_db', 'snr_raw', 'snr_norm'],
-        default='snr_db',
+        default=INTENSITY_MODE,
         help='第 5 維 intensity 的來源：snr_db=接近論文 Intensity；snr_raw=原始 side-info；snr_norm=給舊模型近似標準化',
     )
-    parser.add_argument('--snr_norm_mean', type=float, default=20.0, help='snr_norm 模式使用的 mean')
-    parser.add_argument('--snr_norm_std', type=float, default=10.0, help='snr_norm 模式使用的 std')
-    parser.add_argument('--filter_roi', action='store_true', help='啟用舊版 ROI 篩選；預設關閉以符合 MARS 論文保留 out-of-range points')
-    parser.add_argument('--dtype', choices=['float32', 'float64'], default='float64', help='輸出 NPY dtype；模型訓練檔常見為 float64')
+    parser.add_argument('--snr_norm_mean', type=float, default=SNR_NORM_MEAN, help='snr_norm 模式使用的 mean')
+    parser.add_argument('--snr_norm_std', type=float, default=SNR_NORM_STD, help='snr_norm 模式使用的 std')
+    parser.add_argument('--filter_roi', action='store_true', default=POINT_FILTER_SETTINGS.roi_enabled, help='啟用 ROI 篩選；預設跟 cfg/radar_uart_config.yaml 一致')
+    parser.add_argument('--no_filter_roi', action='store_false', dest='filter_roi', help='關閉 ROI 篩選')
+    parser.add_argument('--show_plot', action='store_true', default=True, help='錄製時同步顯示 pyqtgraph 3D 點雲；預設啟用')
+    parser.add_argument('--no_show_plot', action='store_false', dest='show_plot', help='錄製時不顯示 3D 點雲')
+    parser.add_argument('--plot_hz', type=float, default=10.0, help='3D 點雲顯示更新頻率')
+    parser.add_argument('--dtype', choices=['float32', 'float64'], default=FEATURE_DTYPE, help='輸出 NPY dtype；模型訓練檔常見為 float64')
     args = parser.parse_args()
 
-    cfg_path = os.path.join(absDir.path_config, args.cfg)
+    cfg_path = resolve_cfg_path(args.cfg)
 
     # 自動命名：capture_0.npy, capture_1.npy ...
     if args.output is None:
@@ -507,16 +315,30 @@ def main() -> int:
         port_data=args.port_data,
         frames=args.frames,
         out_path=args.output,
+        send_config=args.send_config,
         baudrate_cfg=args.baudrate_cfg,
         baudrate_data=args.baudrate_data,
         intensity_mode=args.intensity_mode,
         snr_norm_mean=args.snr_norm_mean,
         snr_norm_std=args.snr_norm_std,
-        filter_roi=args.filter_roi,
+        side_info_db_limit=SIDE_INFO_DB_LIMIT,
+        point_filter=replace(POINT_FILTER_SETTINGS, roi_enabled=args.filter_roi),
+        max_points=MAX_POINTS,
+        truncate_before_sort=TRUNCATE_BEFORE_SORT,
+        display_ranges=(DISPLAY_X, DISPLAY_Y, DISPLAY_Z),
+        show_plot=args.show_plot,
+        plot_hz=args.plot_hz,
         dtype=args.dtype,
     )
+    print("[INFO] 設定完成，開始擷取...")
+    print("[INFO] 倒數3秒，請準備好雷達裝置...")
+    import time
+    for i in range(3, 0, -1):
+        print(f"[INFO] {i}...")
+        time.sleep(1)
+    
     return capture_to_npy(settings)
 
 
 if __name__ == '__main__':
-	sys.exit(main())
+    sys.exit(main())

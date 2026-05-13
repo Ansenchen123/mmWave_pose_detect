@@ -47,18 +47,54 @@ from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
 
 from util.find_file import find_default_feature_file
+from util.radar_config import as_bool
+from util.radar_config import cfg_get
+from util.radar_config import cfg_range
+from util.radar_config import ensure_suffix
+from util.radar_config import load_radar_config
+from util.radar_config import resolve_under_root
 
-FILE_CLASS = FileClass.TEST
-FEATURE_FILE = 'mars_pointcloud_0506_Both_upper_limb_extension.npy'
+RADAR_CONFIG = load_radar_config()
+DEFAULT_FILE_CLASS = str(cfg_get(RADAR_CONFIG, 'paths', 'default_file_class', default='test'))
+FEATURE_FILE = str(cfg_get(RADAR_CONFIG, 'paths', 'default_feature_file', default='radar_capture_0.npy'))
+SCATTER_CMAP = str(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'cmap', default='turbo'))
+SCATTER_SIZE = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'size', default=45))
+SCATTER_ALPHA = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'alpha', default=0.95))
+SCATTER_EDGE_COLOR = str(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'edge_color', default='k'))
+SCATTER_LINE_WIDTH = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'line_width', default=0.15))
 
 
 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 軸範圍
-PC_X  = (-1.0, 1.0)
-PC_Y  = ( 0.0, 3.0)
-PC_Z  = (-1.0, 1.0)
+PC_X, PC_Y, PC_Z = cfg_range(RADAR_CONFIG, 'point_cloud')
+
+
+def file_class_from_value(value):
+    if isinstance(value, FileClass):
+        return value
+    text = str(value).strip().lower()
+    mapping = {
+        'test': FileClass.TEST,
+        'standard': FileClass.STANDARD,
+        'reference': FileClass.REFERENCE,
+        '0': FileClass.TEST,
+        '1': FileClass.STANDARD,
+        '2': FileClass.REFERENCE,
+    }
+    return mapping.get(text, FileClass.TEST)
+
+
+def resolve_feature_input(abs_dir: AbsDir, file_class: FileClass, input_path: str) -> str:
+    if os.path.isabs(input_path) and os.path.isfile(input_path):
+        return os.path.normpath(input_path)
+
+    project_candidate = resolve_under_root(input_path)
+    if os.path.isfile(project_candidate):
+        return project_candidate
+
+    return os.path.join(abs_dir.get_feature_dir_by_class(file_class), os.path.basename(input_path))
 
 
 def fmap_to_pts(fmap):
@@ -125,13 +161,13 @@ class PointCloudViewer:
             self.ax_pc.scatter(
                 pts[:, 0], pts[:, 1], pts[:, 2],
                 c=norm_inten,
-                cmap='turbo',
+                cmap=SCATTER_CMAP,
                 vmin=0.0, vmax=1.0,
-                s=50,
-                alpha=0.9,
+                s=SCATTER_SIZE,
+                alpha=SCATTER_ALPHA,
                 depthshade=False,
-                edgecolors='k',
-                linewidths=0.15
+                edgecolors=SCATTER_EDGE_COLOR,
+                linewidths=SCATTER_LINE_WIDTH
             )
         
         self._style(self.ax_pc)
@@ -152,36 +188,26 @@ def main():
     parser = argparse.ArgumentParser(description='顯示雷達點雲')
     parser.add_argument('--input', default=None, help='輸入 .npy 檔案名稱')
     parser.add_argument('--auto', default=False, help='自動尋找最新的 radar_capture_*.npy')
-    parser.add_argument('--file_class', default=None, help='檔案類別 {0: standard, 1: reference, 2: test}')
+    parser.add_argument('--file_class', default=None, help='檔案類別：test / standard / reference 或 0 / 1 / 2')
     args = parser.parse_args()
     
     absDir = AbsDir()
-    path_project_root = absDir.path_project_root
-    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+    default_file_class = file_class_from_value(DEFAULT_FILE_CLASS)
     
-    if args.file_class is None:
-        args.file_class = FILE_CLASS
-    elif args.file_class.isdigit() and args.file_class in ['0', '1', '2']:
-        args.file_class = FileClass.from_number(args.file_class)
-    else:
-        print(f'[WARNING] 無效的 file_class \"{args.file_class}\"，使用預設 {FILE_CLASS}')
-        args.file_class = FILE_CLASS
+    args.file_class = default_file_class if args.file_class is None else file_class_from_value(args.file_class)
     print(f'[INFO] 使用的 file_class: {args.file_class}')
-        
+    path_feature_dir = absDir.get_feature_dir_by_class(args.file_class)
     
-    if args.auto == 'True':
+    if as_bool(args.auto):
         args.input = find_default_feature_file(path_feature_dir)
         if args.input is None:
             print(f'[ERROR] 在 \"{path_feature_dir}\" 找不到任何 .npy 檔案')
             os._exit(0)
     else:
         if args.input is None:
-            args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), FEATURE_FILE)
-            if not os.path.isfile(args.input):
-                print(f'[ERROR] 預設檔案 \"{args.input}\" 不存在')
-                os._exit(0)
-        args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), FEATURE_FILE)
-        if  not os.path.isfile(args.input):
+            args.input = ensure_suffix(FEATURE_FILE, '.npy')
+        args.input = resolve_feature_input(absDir, args.file_class, args.input)
+        if not os.path.isfile(args.input):
             print(f'[WARNING] 輸入檔案 \"{args.input}\" 不存在')
             os._exit(0)
             

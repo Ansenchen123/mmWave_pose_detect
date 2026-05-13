@@ -1,0 +1,94 @@
+# Shared settings for MARS UART capture and realtime viewer.
+
+radar:
+  config_port: COM19
+  data_port: COM20
+  # cfg_file: IWRL6844_4T4R_MARS_paper_like.cfg
+  cfg_file: IWRL6844_4T4R_record_high_accuracy.cfg
+  frames: 200
+  baudrate_cfg: 115200
+  baudrate_data: 1250000
+
+tlv:
+  detected_points: 1
+  side_info: 7
+  frame_sync_word: "0201040306050807"
+  frame_length_offset: 12
+  frame_header_size: 40
+  point_data_size: 16
+  side_info_data_size: 4
+
+point_output:
+  # Both scripts use the capture format:
+  # [x, y, z, doppler, intensity]
+  intensity_mode: snr_db
+  snr_norm_mean: 20.0
+  snr_norm_std: 10.0
+  side_info_db_limit: 100.0
+
+point_filter:
+  # MARS keeps out-of-range / ghost points for robustness.
+  # Leave ROI disabled for paper-compatible collection.
+  remove_all_zero: true
+  roi:
+    enabled: false
+    x_min: -1.0
+    x_max: 1.0
+    y_min: 0.5
+    y_max: 4.0
+    z_min: -1.0
+    z_max: 1.0
+
+feature_map:
+  # Paper-compatible preprocessing:
+  # 1. keep the first 64 reflected points from each radar frame
+  # 2. sort retained points by x -> y -> z
+  # 3. zero-pad if fewer than 64
+  # 4. row-major reshape to 8x8x5
+  max_points: 64
+  dtype: float64
+  truncate_before_sort: true
+  sort_axes: [x, y, z]
+
+paths:
+  default_file_class: test
+  model_file: MARS.h5
+  capture_prefix: radar_capture_
+  default_feature_file: radar_capture_6.npy
+  default_pointcloud_file: mars_pointcloud_0506_Both_upper_limb_extension.mat
+  default_label_file: labels_test.npy
+
+predict:
+  batch_size: 256
+  save_pred: null
+
+triplet:
+  file_class: reference
+  feature_file: featuremap_test.npy
+  label_file: labels_test.npy
+
+conversion:
+  mat_key: marsData
+  all_files: false
+
+display:
+  point_cloud:
+    x_min: -1.0
+    x_max: 1.0
+    y_min: 0.0
+    y_max: 3.0
+    z_min: -1.0
+    z_max: 1.0
+  label:
+    x_min: -1.0
+    x_max: 1.0
+    y_min: 0.0
+    y_max: 3.0
+    z_min: -1.0
+    z_max: 1.0
+  scatter:
+    cmap: turbo
+    size: 45
+    alpha: 0.95
+    edge_color: k
+    line_width: 0.15

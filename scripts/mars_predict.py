@@ -77,20 +77,24 @@ from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
 
 from util.find_file import find_default_feature_file
+from util.radar_config import as_bool
+from util.radar_config import cfg_get
+from util.radar_config import cfg_range
+from util.radar_config import ensure_suffix
+from util.radar_config import load_radar_config
+from util.radar_config import resolve_under_root
 
 
-FILE_CLASS = FileClass.TEST
-FEATURE_FILE = 'radar_capture_5'
+RADAR_CONFIG = load_radar_config()
+DEFAULT_FILE_CLASS = str(cfg_get(RADAR_CONFIG, 'paths', 'default_file_class', default='test'))
+FEATURE_FILE = str(cfg_get(RADAR_CONFIG, 'paths', 'default_feature_file', default='radar_capture_0.npy'))
+MODEL_FILE = str(cfg_get(RADAR_CONFIG, 'paths', 'model_file', default='MARS.h5'))
+BATCH_SIZE = int(cfg_get(RADAR_CONFIG, 'predict', 'batch_size', default=256))
 
 
 # 軸範圍：與 MARS 原版 demo 完全一致（從論文截圖量測）
-PC_X  = (-1.0, 1.0)
-PC_Y  = ( 0.0, 3.0)
-PC_Z  = (-1.0, 1.0)
-
-LBL_X = (-1.0, 1.0)
-LBL_Y = ( 0.0, 3.0)
-LBL_Z = (-1.0, 1.0)
+PC_X, PC_Y, PC_Z = cfg_range(RADAR_CONFIG, 'point_cloud')
+LBL_X, LBL_Y, LBL_Z = cfg_range(RADAR_CONFIG, 'label')
 
 # JOINT_NAMES = [
 #     'SpineBase','SpineMid','Neck','Head', 'SpineShoulder',
@@ -129,7 +133,33 @@ JOINT_ANGLES = {
 
 
 
-def run_inference(fmaps, model_path='model/MARS.h5'):
+def file_class_from_value(value):
+    if isinstance(value, FileClass):
+        return value
+    text = str(value).strip().lower()
+    mapping = {
+        'test': FileClass.TEST,
+        'standard': FileClass.STANDARD,
+        'reference': FileClass.REFERENCE,
+        '0': FileClass.TEST,
+        '1': FileClass.STANDARD,
+        '2': FileClass.REFERENCE,
+    }
+    return mapping.get(text, FileClass.TEST)
+
+
+def resolve_feature_input(abs_dir: AbsDir, file_class: FileClass, input_path: str) -> str:
+    if os.path.isabs(input_path) and os.path.isfile(input_path):
+        return os.path.normpath(input_path)
+
+    project_candidate = resolve_under_root(input_path)
+    if os.path.isfile(project_candidate):
+        return project_candidate
+
+    return os.path.join(abs_dir.get_feature_dir_by_class(file_class), os.path.basename(input_path))
+
+
+def run_inference(fmaps, model_path='model/MARS.h5', batch_size=256):
     if not os.path.exists(model_path):
         print(f'[ERROR] 找不到模型: {model_path}')
         sys.exit(1)
@@ -140,7 +170,7 @@ def run_inference(fmaps, model_path='model/MARS.h5'):
         print(f'[ERROR] feature map shape {fmaps.shape[1:]} ≠ 模型期望 {expected}')
         sys.exit(1)
     print(f'[推論] {len(fmaps)} frames...')
-    y_pred = model.predict(fmaps, batch_size=256, verbose=1)
+    y_pred = model.predict(fmaps, batch_size=batch_size, verbose=1)
     print(f'[推論] 完成  shape={y_pred.shape}')
     return y_pred
 
@@ -284,41 +314,34 @@ class MARSPredictDemo:
 
 def main():
     absDir = AbsDir()
-    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+    default_file_class = file_class_from_value(DEFAULT_FILE_CLASS)
+    path_feature_dir = absDir.get_feature_dir_by_class(default_file_class)
 
     global FEATURE_FILE
-    FEATURE_FILE = FEATURE_FILE if FEATURE_FILE.endswith('.npy') else f'{FEATURE_FILE}.npy'
+    FEATURE_FILE = ensure_suffix(FEATURE_FILE, '.npy')
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', default=None)
-    parser.add_argument('--file_class', default=None, help='檔案類別 {0: standard, 1: reference, 2: test}')
-    parser.add_argument('--model', default=os.path.join(absDir.path_model, 'MARS.h5'))
-    parser.add_argument('--save_pred', default=None)
+    parser.add_argument('--file_class', default=None, help='檔案類別：test / standard / reference 或 0 / 1 / 2')
+    parser.add_argument('--model', default=os.path.join(absDir.path_model, MODEL_FILE))
+    parser.add_argument('--save_pred', default=cfg_get(RADAR_CONFIG, 'predict', 'save_pred', default=None))
     parser.add_argument('--auto', default=False)
     args = parser.parse_args()
 
-    if args.file_class is None:
-        args.file_class = FILE_CLASS
-    elif args.file_class.isdigit() and args.file_class in ['0', '1', '2']:
-        args.file_class = FileClass.from_number(args.file_class)
-    else:
-        print(f'[WARNING] 無效的 file_class \"{args.file_class}\"，使用預設 {FILE_CLASS}')
-        args.file_class = FILE_CLASS
+    args.file_class = default_file_class if args.file_class is None else file_class_from_value(args.file_class)
     print(f'[INFO] 使用的 file_class: {args.file_class}')
+    path_feature_dir = absDir.get_feature_dir_by_class(args.file_class)
         
-    if args.auto == 'True':
+    if as_bool(args.auto):
         args.input = find_default_feature_file(path_feature_dir)
         if args.input is None:
             print(f'[ERROR] 在 \"{path_feature_dir}\" 找不到任何 .npy 檔案')
             os._exit(0)
     else:
         if args.input is None:
-            args.input = os.path.join(absDir.get_feature_file_by_class(args.file_class), FEATURE_FILE)
-            if not os.path.isfile(args.input):
-                print(f'[ERROR] 預設檔案 \"{args.input}\" 不存在')
-                os._exit(0)
-        args.input = os.path.join(absDir.get_feature_dir_by_class(args.file_class), args.input)
-        if  not os.path.isfile(args.input):
+            args.input = FEATURE_FILE
+        args.input = resolve_feature_input(absDir, args.file_class, args.input)
+        if not os.path.isfile(args.input):
             print(f'[WARNING] 輸入檔案 \"{args.input}\" 不存在')
             os._exit(0)
 
@@ -329,7 +352,7 @@ def main():
         print(f'[ERROR] 需要 (N,8,8,5)，實際 {fmaps.shape}')
         sys.exit(1)
 
-    y_pred = run_inference(fmaps, args.model)
+    y_pred = run_inference(fmaps, args.model, batch_size=BATCH_SIZE)
 
     if args.save_pred:
         np.save(args.save_pred, y_pred)

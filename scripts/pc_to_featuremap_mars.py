@@ -35,12 +35,42 @@ import os, sys, argparse
 import numpy as np
 import glob
 
+from radar_uart import filter_points
+from radar_uart import point_filter_settings_from_config
+from radar_uart import select_mars_points
 from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
+from util.radar_config import as_bool
+from util.radar_config import cfg_get
+from util.radar_config import ensure_suffix
+from util.radar_config import load_radar_config
+from util.radar_config import resolve_under_root
 
-FILE_CLASS = FileClass.TEST
+RADAR_CONFIG = load_radar_config()
+POINT_FILTER_SETTINGS = point_filter_settings_from_config(RADAR_CONFIG)
+
+DEFAULT_FILE_CLASS = str(cfg_get(RADAR_CONFIG, 'paths', 'default_file_class', default='test'))
+DEFAULT_POINTCLOUD_FILE = str(cfg_get(RADAR_CONFIG, 'paths', 'default_pointcloud_file', default='mars_pointcloud_0506_Both_upper_limb_extension.mat'))
+DEFAULT_MAT_KEY = str(cfg_get(RADAR_CONFIG, 'conversion', 'mat_key', default='marsData'))
+DEFAULT_ALL_FILES = bool(cfg_get(RADAR_CONFIG, 'conversion', 'all_files', default=False))
+MAX_POINTS = int(cfg_get(RADAR_CONFIG, 'feature_map', 'max_points', default=64))
+FEATURE_DTYPE = str(cfg_get(RADAR_CONFIG, 'feature_map', 'dtype', default='float64'))
+TRUNCATE_BEFORE_SORT = bool(cfg_get(RADAR_CONFIG, 'feature_map', 'truncate_before_sort', default=True))
 
 
+def file_class_from_value(value):
+    if isinstance(value, FileClass):
+        return value
+    text = str(value).strip().lower()
+    mapping = {
+        'test': FileClass.TEST,
+        'standard': FileClass.STANDARD,
+        'reference': FileClass.REFERENCE,
+        '0': FileClass.TEST,
+        '1': FileClass.STANDARD,
+        '2': FileClass.REFERENCE,
+    }
+    return mapping.get(text, FileClass.TEST)
 
 
 def load_data(path, mat_key='marsData'):
@@ -92,7 +122,7 @@ def frame_to_featuremap(frame, x_range, y_range, grid_h=8, grid_w=8):
             fmap_inten[row, col] = inten
     return fmap
 '''
-def frame_to_featuremap(frame, max_points=64):
+def frame_to_featuremap(frame, max_points=64, dtype=np.float64):
     """
     MARS標準做法：
     1. 不做 spatial binning
@@ -102,32 +132,18 @@ def frame_to_featuremap(frame, max_points=64):
     """
 
     if frame.shape[0] == 0:
-        return np.zeros((8, 8, 5), dtype=np.float32)
-    '''
-    frame = frame.copy()
-    
-    frame[:, [0,1]] = frame[:, [1,0]]
-    frame[:,2] = -frame[:,2]
-    '''
-    # ===== ROI filtering =====
-    mask = (
-        (frame[:,0] > -1.0) & (frame[:,0] < 1.0) &
-        (frame[:,1] >  0.3) & (frame[:,1] < 3.0) &
-        (frame[:,2] > -1.0) & (frame[:,2] < 1.0)
+        return np.zeros((8, 8, 5), dtype=dtype)
+
+    frame = filter_points(frame.astype(dtype, copy=False), POINT_FILTER_SETTINGS)
+    frame = select_mars_points(
+        frame,
+        max_points=max_points,
+        truncate_before_sort=TRUNCATE_BEFORE_SORT,
     )
 
-    frame = frame[mask]
-    
-    # 🔹 1. sorting（關鍵）
-    frame = frame[np.lexsort((frame[:,2], frame[:,1], frame[:,0]))]
-
-    # 🔹 2. 截斷
-    if len(frame) > max_points:
-        frame = frame[:max_points]
-
-    # 🔹 3. padding
-    elif len(frame) < max_points:
-        pad = np.zeros((max_points - len(frame), 5), dtype=np.float32)
+    # 🔹 padding
+    if len(frame) < max_points:
+        pad = np.zeros((max_points - len(frame), 5), dtype=dtype)
         frame = np.vstack((frame, pad))
 
     # 🔹 4. reshape
@@ -135,13 +151,13 @@ def frame_to_featuremap(frame, max_points=64):
 
     return fmap
 
-def convert(pc):
+def convert(pc, max_points=64, dtype=np.float64):
     if pc.ndim == 4:
         print('[INFO] 輸入已是 feature map，直接使用')
-        return pc
+        return pc.astype(dtype, copy=False)
     N = len(pc)
     print(f'[轉換] {N} frames，座標保留真實公尺（不正規化）')
-    fmaps = np.stack([frame_to_featuremap(pc[i]) for i in range(N)])
+    fmaps = np.stack([frame_to_featuremap(pc[i], max_points=max_points, dtype=dtype) for i in range(N)])
     used = np.mean(np.any(fmaps != 0, axis=-1))
     pts  = np.array([np.sum(pc[i][:,4] > 1e-6) for i in range(N)])
     print(f'[結果] shape={fmaps.shape}  平均點數={pts.mean():.1f}  grid使用率={used*100:.1f}%')
@@ -152,14 +168,13 @@ def convert(pc):
 
 def main():
     absDir = AbsDir()
-    path_project_root = absDir.path_project_root
-    path_pointcloud_dir = absDir.get_pointcloud_dir_by_class(FILE_CLASS)
-    pointcloud_file_name = 'mars_pointcloud_0506_Both_upper_limb_extension'
-    pointcloud_file_name = pointcloud_file_name if pointcloud_file_name.endswith('.mat') else f'{pointcloud_file_name}.mat'
+    file_class = file_class_from_value(DEFAULT_FILE_CLASS)
+    path_pointcloud_dir = absDir.get_pointcloud_dir_by_class(file_class)
+    pointcloud_file_name = ensure_suffix(DEFAULT_POINTCLOUD_FILE, '.mat')
     pointcloud_file = os.path.join(path_pointcloud_dir, pointcloud_file_name)
 
     feature_file_name = os.path.splitext(pointcloud_file_name)[0] + '.npy'
-    path_feature_dir = absDir.get_feature_dir_by_class(FILE_CLASS)
+    path_feature_dir = absDir.get_feature_dir_by_class(file_class)
     feature_file = os.path.join(path_feature_dir, feature_file_name)
 
     print(f'[預設] 來源點雲檔案: {pointcloud_file}')
@@ -168,35 +183,45 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input',   default=None)
     parser.add_argument('--output',  default=None)
-    parser.add_argument('--auto',  default=False, 
-                        help='若為True，處理所有在 POINTCLOUD_DIR 路徑下的.mat檔，並保存在同一路徑下的feature資料夾中')
-    parser.add_argument('--mat_key', default='marsData')
-    parser.add_argument('--x_range', type=float, nargs=2, default=[-1.5, 2.0],
-                        help='你的雷達 x（左右）範圍，公尺（依你的實際量測範圍設定）')
-    parser.add_argument('--y_range', type=float, nargs=2, default=[0.5, 3.0],
-                        help='你的雷達 y（深度）範圍，公尺')
+    parser.add_argument('--all_files', default=DEFAULT_ALL_FILES, help='True 時處理 file_class 對應 pointcloud 目錄下所有 .mat')
+    parser.add_argument('--file_class', default=DEFAULT_FILE_CLASS, help='檔案類別：test / standard / reference 或 0 / 1 / 2')
+    parser.add_argument('--mat_key', default=DEFAULT_MAT_KEY)
     args = parser.parse_args()
-    
-    if args.all_files:
-        global POINTCLOUD_FILE
-        POINTCLOUD_FILE = '*.mat'
 
-    if (args.input is None) or (not os.path.isfile(args.input)):
-        args.input = os.path.join(POINTCLOUD_DIR, POINTCLOUD_FILE)
+    file_class = file_class_from_value(args.file_class)
+    path_pointcloud_dir = absDir.get_pointcloud_dir_by_class(file_class)
+    path_feature_dir = absDir.get_feature_dir_by_class(file_class)
+    dtype = np.float64 if FEATURE_DTYPE == 'float64' else np.float32
+    
+    if as_bool(args.all_files):
+        args.input = os.path.join(path_pointcloud_dir, '*.mat')
+    elif args.input is None:
+        args.input = pointcloud_file
+    elif not os.path.isabs(args.input):
+        project_candidate = resolve_under_root(args.input)
+        if os.path.isfile(project_candidate):
+            args.input = project_candidate
+        else:
+            args.input = os.path.join(path_pointcloud_dir, os.path.basename(args.input))
+
     print(f'[輸入] {args.input}')
     input_file = glob.glob(args.input)
     
-    if args.all_files:
+    if as_bool(args.all_files):
         for f in input_file:
             print(f'  - {f}')
     
     for input_path in input_file:
         print(f'\n[處理] {input_path}')
-        FEATURE_FILE = f'{os.path.splitext(os.path.basename(input_path))[0]}.npy'
-        output_file = os.path.join(FEATURE_DIR, FEATURE_FILE)
+        if args.output is None or as_bool(args.all_files):
+            output_file = os.path.join(path_feature_dir, f'{os.path.splitext(os.path.basename(input_path))[0]}.npy')
+        elif os.path.isabs(args.output):
+            output_file = args.output
+        else:
+            output_file = resolve_under_root(args.output)
 
         pc    = load_data(input_path, args.mat_key)
-        fmaps = convert(pc)
+        fmaps = convert(pc, max_points=MAX_POINTS, dtype=dtype)
         np.save(output_file, fmaps)
         print(f'[儲存] {output_file}')
 

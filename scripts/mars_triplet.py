@@ -31,20 +31,23 @@ try:
 except ImportError:
     from tensorflow.keras.models import load_model
 
-import util.get_abs_dir as get_abs_dir
+from util.AbsDir import AbsDir
+from util.radar_config import cfg_get
+from util.radar_config import cfg_range
+from util.radar_config import load_radar_config
+from util.radar_config import resolve_under_root
 
 
 # ============================================================
 # 預設設定
 # ============================================================
-DEFAULT_FILE_CLASS = 'reference'
-DEFAULT_FEATURE_FILE = 'featuremap_train.npy'
-DEFAULT_LABEL_FILE = 'labels_train.npy'
-DEFAULT_MODEL_PATH = 'model/MARS.h5'
+RADAR_CONFIG = load_radar_config()
+DEFAULT_FILE_CLASS = str(cfg_get(RADAR_CONFIG, 'triplet', 'file_class', default='reference'))
+DEFAULT_FEATURE_FILE = str(cfg_get(RADAR_CONFIG, 'triplet', 'feature_file', default='featuremap_test.npy'))
+DEFAULT_LABEL_FILE = str(cfg_get(RADAR_CONFIG, 'triplet', 'label_file', default='labels_test.npy'))
+DEFAULT_MODEL_PATH = str(cfg_get(RADAR_CONFIG, 'paths', 'model_file', default='MARS.h5'))
 
-PC_X = (-1.0, 1.0)
-PC_Y = (0.0, 3.0)
-PC_Z = (-1.0, 1.0)
+PC_X, PC_Y, PC_Z = cfg_range(RADAR_CONFIG, 'point_cloud')
 
 JOINT_NAMES = [
     '脊椎基底', '脊椎中段', '頸部', '頭部',
@@ -232,7 +235,7 @@ class MARSTripletDemo:
 
 
 def main():
-    path_project_root, path_feature, _ = get_abs_dir.get_abs_dir()
+    abs_dir = AbsDir()
 
     parser = argparse.ArgumentParser(description='MARS 三欄檢視 demo')
     parser.add_argument('--input', default=None, help='feature map .npy')
@@ -241,16 +244,16 @@ def main():
     parser.add_argument('--file_class', default=DEFAULT_FILE_CLASS, help='reference / standard_pose')
     args = parser.parse_args()
 
-    feature_dir = os.path.join(path_project_root, path_feature, args.file_class)
+    feature_dir = os.path.join(abs_dir.path_feature, args.file_class)
 
     if args.input is None:
         args.input = os.path.join(feature_dir, DEFAULT_FEATURE_FILE)
     if args.label is None:
         args.label = os.path.join(feature_dir, DEFAULT_LABEL_FILE)
     if args.model is None:
-        args.model = os.path.join(path_project_root, 'MARS_Predict', DEFAULT_MODEL_PATH)
+        args.model = os.path.join(abs_dir.path_model, DEFAULT_MODEL_PATH)
     elif not os.path.isabs(args.model):
-        args.model = os.path.join(path_project_root, args.model)
+        args.model = resolve_under_root(args.model)
 
     print(f'[輸入] {args.input}')
     print(f'[標籤] {args.label}')
