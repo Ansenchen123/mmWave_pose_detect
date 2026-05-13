@@ -31,7 +31,7 @@ from util.radar_config import load_radar_config
 from util.radar_config import resolve_cfg_path
 
 
-EXPERIMENT_VERSION = 'v1-point-driven-skeleton'
+EXPERIMENT_VERSION = 'v2-front-depth-heatmap'
 RADAR_CONFIG = load_radar_config()
 
 DEFAULT_CONFIG_PORT = str(cfg_get(RADAR_CONFIG, 'radar', 'config_port', default='COM19'))
@@ -80,6 +80,9 @@ class ExperimentSettings:
     send_config: bool
     demo: bool
     update_hz: float
+    bins_x: int
+    bins_z: int
+    heatmap_decay: float
     influence_radius: float
     pull_gain: float
     smoothing: float
@@ -197,6 +200,25 @@ def y_to_rgba(y_values: np.ndarray, y_range: Tuple[float, float]) -> np.ndarray:
     )).astype(np.float32)
 
 
+def add_points_to_front_heatmap(heatmap: np.ndarray, points: np.ndarray, settings: ExperimentSettings) -> None:
+    if points.shape[0] == 0:
+        return
+
+    x_min, x_max = settings.x_range
+    z_min, z_max = settings.z_range
+    x_idx = ((points[:, 0] - x_min) / range_span(settings.x_range) * settings.bins_x).astype(np.int32)
+    z_idx = ((points[:, 2] - z_min) / range_span(settings.z_range) * settings.bins_z).astype(np.int32)
+    valid = (
+        (x_idx >= 0) & (x_idx < settings.bins_x) &
+        (z_idx >= 0) & (z_idx < settings.bins_z)
+    )
+    if not np.any(valid):
+        return
+
+    # Color/intensity is radar Y depth in meters, matching topdown_depth_heatmap.py v3.
+    np.maximum.at(heatmap, (z_idx[valid], x_idx[valid]), points[:, 1][valid].astype(np.float32, copy=False))
+
+
 def line_points_for_joints(joints: np.ndarray) -> np.ndarray:
     return np.asarray([joints[index] for edge in SKELETON_EDGES for index in edge], dtype=np.float32)
 
@@ -215,6 +237,7 @@ class DualSceneViewer:
         self.gl = gl
         self.qt_gui = QtGui
         self.qt_widgets = QtWidgets
+        pg.setConfigOptions(imageAxisOrder='row-major')
         self.app = QtWidgets.QApplication.instance() or pg.mkQApp('IWRL6844 Skeleton Experiment')
         self.window = QtWidgets.QWidget()
         self.window.setWindowTitle(f'IWRL6844 Dynamic Skeleton Experiment {EXPERIMENT_VERSION}')
@@ -224,17 +247,16 @@ class DualSceneViewer:
             'QLabel { font-family: Consolas, Microsoft JhengHei, sans-serif; }'
         )
 
-        self.point_title = QtWidgets.QLabel('Radar point cloud')
+        self.point_title = QtWidgets.QLabel('Front depth heatmap')
         self.skeleton_title = QtWidgets.QLabel('Point-driven skeleton')
         for label in (self.point_title, self.skeleton_title):
             label.setAlignment(QtCore.Qt.AlignCenter)
             label.setStyleSheet('font-size: 17px; font-weight: 600; padding: 8px;')
 
-        self.point_view = self._make_view(settings.x_range, settings.y_range, settings.z_range)
+        self.heatmap = np.zeros((settings.bins_z, settings.bins_x), dtype=np.float32)
+        self.point_view, self.heatmap_image = self._make_heatmap_plot(pg, QtCore, settings)
         self.skeleton_view = self._make_view(LBL_X, settings.y_range, LBL_Z)
 
-        self.point_scatter = gl.GLScatterPlotItem(pos=np.empty((0, 3), dtype=np.float32), color=np.empty((0, 4), dtype=np.float32), size=8, pxMode=True)
-        self.point_view.addItem(self.point_scatter)
         self.joint_scatter = gl.GLScatterPlotItem(pos=np.empty((0, 3), dtype=np.float32), color=(1.0, 0.22, 0.12, 1.0), size=10, pxMode=True)
         self.skeleton_view.addItem(self.joint_scatter)
         self.skeleton_lines = gl.GLLinePlotItem(pos=np.empty((0, 3), dtype=np.float32), color=(1.0, 0.12, 0.06, 1.0), width=2.6, mode='lines', antialias=True)
@@ -262,6 +284,41 @@ class DualSceneViewer:
         self.window.show()
         self.app.processEvents()
 
+    def _make_heatmap_plot(self, pg, qt_core, settings: ExperimentSettings):
+        plot = pg.PlotWidget()
+        plot.setBackground((17, 19, 24))
+        plot.setLabel('bottom', 'X left/right', units='m')
+        plot.setLabel('left', 'Z height', units='m')
+        plot.setXRange(settings.x_range[0], settings.x_range[1], padding=0)
+        plot.setYRange(settings.z_range[0], settings.z_range[1], padding=0)
+        plot.showGrid(x=True, y=True, alpha=0.22)
+        plot.setAspectLocked(False)
+
+        image = pg.ImageItem()
+        try:
+            cmap = pg.ColorMap(
+                pos=np.array([0.0, 0.25, 0.50, 0.75, 1.0]),
+                color=np.array([
+                    [0, 0, 0, 255],
+                    [38, 14, 84, 255],
+                    [178, 51, 84, 255],
+                    [249, 142, 8, 255],
+                    [252, 255, 164, 255],
+                ], dtype=np.ubyte),
+            )
+            image.setLookupTable(cmap.getLookupTable(0.0, 1.0, 256))
+        except Exception:
+            pass
+        image.setImage(self.heatmap, autoLevels=False, levels=settings.y_range)
+        image.setRect(qt_core.QRectF(
+            settings.x_range[0],
+            settings.z_range[0],
+            range_span(settings.x_range),
+            range_span(settings.z_range),
+        ))
+        plot.addItem(image)
+        return plot, image
+
     def _make_view(self, x_range: Tuple[float, float], y_range: Tuple[float, float], z_range: Tuple[float, float]):
         x_center = range_center(x_range)
         y_center = range_center(y_range)
@@ -281,25 +338,19 @@ class DualSceneViewer:
         return view
 
     def update(self, frame_number: int, points: np.ndarray, joints: np.ndarray, settings: ExperimentSettings) -> None:
-        if points.shape[0] == 0:
-            self.point_scatter.setData(pos=np.empty((0, 3), dtype=np.float32), color=np.empty((0, 4), dtype=np.float32))
-        else:
-            self.point_scatter.setData(
-                pos=points[:, 0:3].astype(np.float32, copy=False),
-                color=y_to_rgba(points[:, 1], settings.y_range),
-                size=8,
-                pxMode=True,
-            )
+        self.heatmap *= settings.heatmap_decay
+        add_points_to_front_heatmap(self.heatmap, points, settings)
+        self.heatmap_image.setImage(self.heatmap, autoLevels=False, levels=settings.y_range)
 
         self.joint_scatter.setData(pos=joints.astype(np.float32, copy=False), color=(1.0, 0.22, 0.12, 1.0), size=10, pxMode=True)
         self.skeleton_lines.setData(pos=line_points_for_joints(joints))
         cfg_name = os.path.basename(settings.cfg_path)
-        self.point_title.setText(f'Radar point cloud - frame {frame_number}, pts {points.shape[0]}')
+        self.point_title.setText(f'Front depth heatmap - frame {frame_number}, pts {points.shape[0]}')
         self.skeleton_title.setText(f'Point-driven skeleton - {EXPERIMENT_VERSION}')
         self.status.setText(
             f'cfg {cfg_name} | radius {settings.influence_radius:.2f} m | '
             f'pull {settings.pull_gain:.2f} | smoothing {settings.smoothing:.2f} | '
-            f'color = Y depth'
+            f'left color = Y depth | left axes = X/Z'
         )
         self.app.processEvents()
 
@@ -425,6 +476,9 @@ def run_self_test() -> int:
         send_config=False,
         demo=True,
         update_hz=10.0,
+        bins_x=160,
+        bins_z=180,
+        heatmap_decay=0.90,
         influence_radius=0.55,
         pull_gain=0.55,
         smoothing=0.65,
@@ -459,6 +513,9 @@ def main() -> int:
     parser.add_argument('--demo', action='store_true', help='Use synthetic moving points instead of UART hardware')
     parser.add_argument('--self_test', action='store_true', help='Run non-GUI skeleton math test and exit')
     parser.add_argument('--update_hz', type=float, default=15.0)
+    parser.add_argument('--bins_x', type=int, default=160, help='Front heatmap horizontal bins')
+    parser.add_argument('--bins_z', type=int, default=180, help='Front heatmap height bins')
+    parser.add_argument('--heatmap_decay', type=float, default=0.90, help='Front heatmap temporal decay from 0.0 to 1.0')
     parser.add_argument('--influence_radius', type=float, default=0.55, help='Meters around each joint that can pull it')
     parser.add_argument('--pull_gain', type=float, default=0.55, help='How strongly local points pull each joint')
     parser.add_argument('--smoothing', type=float, default=0.65, help='0=no smoothing, 0.95=very slow skeleton')
@@ -482,6 +539,12 @@ def main() -> int:
     if args.influence_radius <= 0 or args.pull_gain < 0:
         print('[ERROR] influence_radius must be positive and pull_gain must be non-negative')
         return 1
+    if args.bins_x <= 0 or args.bins_z <= 0:
+        print('[ERROR] bins_x and bins_z must be positive')
+        return 1
+    if not 0.0 <= args.heatmap_decay <= 1.0:
+        print('[ERROR] heatmap_decay must satisfy 0.0 <= heatmap_decay <= 1.0')
+        return 1
 
     settings = ExperimentSettings(
         cfg_path=cfg_path,
@@ -493,6 +556,9 @@ def main() -> int:
         send_config=args.send_config,
         demo=args.demo,
         update_hz=args.update_hz,
+        bins_x=args.bins_x,
+        bins_z=args.bins_z,
+        heatmap_decay=args.heatmap_decay,
         influence_radius=args.influence_radius,
         pull_gain=args.pull_gain,
         smoothing=args.smoothing,
