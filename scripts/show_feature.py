@@ -22,10 +22,10 @@ show_feature.py
   A / D 鍵   : 逐 frame 切換
   PageUp     : 往前跳 50 frames
   PageDown   : 往後跳 50 frames
-  滑塊       : 直接選擇 frame
+  Qt 滑塊    : 直接選擇 frame
 
 顯示內容：
-  - 3D 點雲散點圖
+  - pyqtgraph OpenGL 3D 點雲散點圖
   - x 軸：左右（m）
   - y 軸：深度（m）
   - z 軸：高度（m）
@@ -38,11 +38,11 @@ show_feature.py
 
 import os, sys, argparse
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from matplotlib.widgets import Slider
-from mpl_toolkits.mplot3d import Axes3D  # noqa
 
+from pointcloud_pyqtgraph import add_axis_guides
+from pointcloud_pyqtgraph import clip_display_points
+from pointcloud_pyqtgraph import range_center
+from pointcloud_pyqtgraph import range_span
 from util.AbsDir import AbsDir
 from util.AbsDir import FileClass
 
@@ -57,15 +57,8 @@ from util.radar_config import resolve_under_root
 RADAR_CONFIG = load_radar_config()
 DEFAULT_FILE_CLASS = str(cfg_get(RADAR_CONFIG, 'paths', 'default_file_class', default='test'))
 FEATURE_FILE = str(cfg_get(RADAR_CONFIG, 'paths', 'default_feature_file', default='radar_capture_0.npy'))
-SCATTER_CMAP = str(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'cmap', default='turbo'))
 SCATTER_SIZE = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'size', default=45))
 SCATTER_ALPHA = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'alpha', default=0.95))
-SCATTER_EDGE_COLOR = str(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'edge_color', default='k'))
-SCATTER_LINE_WIDTH = float(cfg_get(RADAR_CONFIG, 'display', 'scatter', 'line_width', default=0.15))
-
-
-plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
-plt.rcParams['axes.unicode_minus'] = False
 
 # 軸範圍
 PC_X, PC_Y, PC_Z = cfg_range(RADAR_CONFIG, 'point_cloud')
@@ -103,6 +96,25 @@ def fmap_to_pts(fmap):
     return pts[np.any(pts != 0, axis=1)]
 
 
+def intensity_to_rgba(intensity: np.ndarray) -> np.ndarray:
+    """Map point intensity to a compact turbo-like RGBA ramp for pyqtgraph."""
+    if intensity.size == 0:
+        return np.empty((0, 4), dtype=np.float32)
+
+    p1, p99 = np.percentile(intensity.astype(np.float32, copy=False), [1, 99])
+    if p99 - p1 < 1e-6:
+        t = np.zeros_like(intensity, dtype=np.float32)
+    else:
+        t = np.clip((intensity - p1) / (p99 - p1), 0.0, 1.0).astype(np.float32)
+
+    return np.column_stack((
+        np.clip(1.5 * t, 0.0, 1.0),
+        np.clip(1.5 - np.abs(t - 0.5) * 2.2, 0.0, 1.0),
+        np.clip(1.2 - 1.7 * t, 0.0, 1.0),
+        np.full_like(t, SCATTER_ALPHA),
+    )).astype(np.float32)
+
+
 
 class PointCloudViewer:
     def __init__(self, fmaps, title_suffix=''):
@@ -114,74 +126,138 @@ class PointCloudViewer:
         self._update(0)
 
     def _build(self):
-        self.fig = plt.figure(figsize=(10, 8), facecolor='white')
+        try:
+            import pyqtgraph as pg
+            import pyqtgraph.opengl as gl
+            from pyqtgraph.Qt import QtCore
+            from pyqtgraph.Qt import QtGui
+            from pyqtgraph.Qt import QtWidgets
+        except ImportError as exc:
+            raise RuntimeError(
+                '需要先安裝 pyqtgraph 3D 依賴：python -m pip install pyqtgraph PyQt5 PyOpenGL'
+            ) from exc
+
+        self.gl = gl
+        self.qt_core = QtCore
+        self.app = QtWidgets.QApplication.instance() or pg.mkQApp('Point Cloud Viewer')
+
         window_title = 'Point Cloud Viewer'
         if self.title_suffix:
             window_title += f' - {self.title_suffix}'
-        self.fig.canvas.manager.set_window_title(window_title)
 
-        outer = gridspec.GridSpec(2, 1, figure=self.fig,
-                                  height_ratios=[5, 0.75], hspace=0.08)
-        self.ax_pc = self.fig.add_subplot(outer[0], projection='3d')
-        ax_sld = self.fig.add_subplot(outer[1])
-        
-        self.slider = Slider(ax_sld, 'Frame', 0, self.N-1,
-                             valinit=0, valstep=1, color='steelblue')
-        self.slider.on_changed(lambda v: self._update(int(v)))
-        self.fig.canvas.mpl_connect('key_press_event', self._on_key)
+        self.window = QtWidgets.QWidget()
+        self.window.setWindowTitle(window_title)
+        self.window.resize(1040, 820)
+        self.window.setFocusPolicy(QtCore.Qt.StrongFocus)
+        self.window.keyPressEvent = self._on_key
+        self.window.setStyleSheet(
+            'QWidget { background-color: #121418; color: #f4f4f4; }'
+            'QLabel { font-family: Consolas, Microsoft JhengHei, sans-serif; }'
+        )
 
-    def _style(self, ax):
-        ax.set_title(f'Radar Point Cloud - Frame {self.idx}', 
-                     fontsize=11, fontweight='bold', pad=5)
-        ax.set_xlim(*PC_X)
-        ax.set_ylim(*PC_Y)
-        ax.set_zlim(*PC_Z)
-        ax.set_xlabel('X left-right (m)', fontsize=9)
-        ax.set_ylabel('Y depth (m)', fontsize=9)
-        ax.set_zlabel('Z height (m)', fontsize=9)
-        ax.tick_params(labelsize=8)
-        ax.view_init(elev=15, azim=-60)
+        self.title_label = QtWidgets.QLabel('')
+        self.title_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.title_label.setStyleSheet('font-size: 18px; font-weight: 600; padding: 8px;')
+
+        self.view = self._make_view(gl, QtGui)
+        self.scatter = gl.GLScatterPlotItem(
+            pos=np.empty((0, 3), dtype=np.float32),
+            color=np.empty((0, 4), dtype=np.float32),
+            size=max(SCATTER_SIZE * 0.18, 4.0),
+            pxMode=True,
+        )
+        self.view.addItem(self.scatter)
+
+        self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(max(self.N - 1, 0))
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(50)
+        self.slider.valueChanged.connect(self._update)
+
+        self.status_label = QtWidgets.QLabel('')
+        self.status_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.status_label.setStyleSheet('font-size: 13px; padding: 4px;')
+
+        layout = QtWidgets.QVBoxLayout(self.window)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.view, stretch=1)
+        layout.addWidget(self.slider)
+        layout.addWidget(self.status_label)
+
+    def _make_view(self, gl, qt_gui):
+        x_center = range_center(PC_X)
+        y_center = range_center(PC_Y)
+        z_center = range_center(PC_Z)
+        x_span = range_span(PC_X)
+        y_span = range_span(PC_Y)
+        z_span = range_span(PC_Z)
+
+        view = gl.GLViewWidget()
+        view.setBackgroundColor((18, 20, 24))
+        view.setCameraPosition(distance=max(x_span, y_span, z_span) * 1.8, elevation=18, azimuth=-62)
+        view.opts['center'].setX(x_center)
+        view.opts['center'].setY(y_center)
+        view.opts['center'].setZ(z_center)
+
+        grid = gl.GLGridItem()
+        grid.setSize(x=x_span, y=y_span)
+        grid.setSpacing(x=max(x_span / 8.0, 0.25), y=max(y_span / 8.0, 0.25))
+        grid.translate(x_center, y_center, PC_Z[0])
+        view.addItem(grid)
+        add_axis_guides(view, gl, qt_gui, (PC_X, PC_Y, PC_Z))
+        return view
 
     def _update(self, idx):
         idx = int(np.clip(idx, 0, self.N-1))
         self.idx = idx
-        self.ax_pc.cla()
+        if self.slider.value() != idx:
+            self.slider.blockSignals(True)
+            self.slider.setValue(idx)
+            self.slider.blockSignals(False)
 
-        pts = fmap_to_pts(self.fmaps[idx])
-        if len(pts) > 0:
-            inten = pts[:, 4].astype(np.float32)
-            
-            # 用百分位數正規化
-            p1, p99 = np.percentile(inten, [1, 99])
-            if p99 - p1 < 1e-6:
-                norm_inten = np.zeros_like(inten)
-            else:
-                norm_inten = np.clip((inten - p1) / (p99 - p1), 0.0, 1.0)
-
-            self.ax_pc.scatter(
-                pts[:, 0], pts[:, 1], pts[:, 2],
-                c=norm_inten,
-                cmap=SCATTER_CMAP,
-                vmin=0.0, vmax=1.0,
-                s=SCATTER_SIZE,
-                alpha=SCATTER_ALPHA,
-                depthshade=False,
-                edgecolors=SCATTER_EDGE_COLOR,
-                linewidths=SCATTER_LINE_WIDTH
+        pts = clip_display_points(fmap_to_pts(self.fmaps[idx]), (PC_X, PC_Y, PC_Z))
+        if pts.size == 0:
+            self.scatter.setData(
+                pos=np.empty((0, 3), dtype=np.float32),
+                color=np.empty((0, 4), dtype=np.float32),
             )
-        
-        self._style(self.ax_pc)
-        self.fig.canvas.draw_idle()
+        else:
+            self.scatter.setData(
+                pos=pts[:, 0:3].astype(np.float32, copy=False),
+                color=intensity_to_rgba(pts[:, 4]),
+                size=max(SCATTER_SIZE * 0.18, 4.0),
+                pxMode=True,
+            )
+
+        self.title_label.setText(f'Radar Point Cloud - Frame {self.idx}')
+        self.status_label.setText(f'Frame {self.idx + 1}/{self.N}    pts {len(pts)}')
+        self.app.processEvents()
 
     def _on_key(self, event):
-        step = {'right':1, 'd':1, 'left':-1, 'a':-1,
-                'pagedown':50, 'pageup':-50}.get(event.key, 0)
+        key = event.key()
+        text = event.text().lower()
+        step = 0
+        if key == self.qt_core.Qt.Key_Right or text == 'd':
+            step = 1
+        elif key == self.qt_core.Qt.Key_Left or text == 'a':
+            step = -1
+        elif key == self.qt_core.Qt.Key_PageDown:
+            step = 50
+        elif key == self.qt_core.Qt.Key_PageUp:
+            step = -50
         if step:
-            self.slider.set_val(np.clip(self.idx + step, 0, self.N-1))
+            self._update(int(np.clip(self.idx + step, 0, self.N-1)))
+            event.accept()
+        else:
+            event.ignore()
 
     def show(self):
-        plt.tight_layout()
-        plt.show()
+        self.window.show()
+        self.window.activateWindow()
+        self.window.setFocus()
+        self.app.exec_()
 
 
 def main():    

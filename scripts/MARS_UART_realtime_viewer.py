@@ -106,12 +106,7 @@ def format_point_line(point_index: int, point: np.ndarray) -> str:
 
 
 def print_frame(frame_data: FrameData, display_index: int, settings: CaptureSettings) -> None:
-	valid_points = filter_points(frame_data.points, settings.point_filter)
-	valid_points = select_mars_points(
-		valid_points,
-		max_points=settings.max_points,
-		truncate_before_sort=settings.truncate_before_sort,
-	)
+	valid_points = valid_points_for_frame(frame_data, settings)
 
 	print()
 	print(f'========== Frame {display_index} ==========' )
@@ -161,13 +156,18 @@ def print_frame(frame_data: FrameData, display_index: int, settings: CaptureSett
 				for desc, vals in interpretations:
 					print(f'  {desc}: f1={vals[0]: .6f}, f2={vals[1]: .6f}, f3={vals[2]: .6f}, f4={vals[3]: .6f}')
 
-def points_for_display(frame_data: FrameData, settings: CaptureSettings) -> np.ndarray:
+def valid_points_for_frame(frame_data: FrameData, settings: CaptureSettings) -> np.ndarray:
 	pts = filter_points(frame_data.points, settings.point_filter)
 	pts = select_mars_points(
 		pts,
 		max_points=settings.max_points,
 		truncate_before_sort=settings.truncate_before_sort,
 	)
+	return pts
+
+
+def points_for_display(valid_points: np.ndarray, settings: CaptureSettings) -> np.ndarray:
+	pts = valid_points
 	if pts.size == 0:
 		return pts
 
@@ -333,9 +333,26 @@ def init_plot(settings: CaptureSettings):
 		pxMode=True,
 	)
 	view.addItem(scatter)
+
+	point_count_label = QtWidgets.QLabel(view)
+	point_count_label.setText('有效點數: 0')
+	point_count_label.setStyleSheet(
+		'QLabel {'
+		'color: white;'
+		'background-color: rgba(0, 0, 0, 150);'
+		'border: 1px solid rgba(255, 255, 255, 80);'
+		'padding: 6px 10px;'
+		'font-size: 18px;'
+		'font-weight: 600;'
+		'}'
+	)
+	point_count_label.adjustSize()
+	point_count_label.move(12, 12)
+	point_count_label.show()
+
 	view.show()
 	app.processEvents()
-	return {'app': app, 'view': view, 'scatter': scatter}
+	return {'app': app, 'view': view, 'scatter': scatter, 'point_count_label': point_count_label}
 
 
 def y_to_rgba(y_values: np.ndarray, y_range: tuple[float, float]) -> np.ndarray:
@@ -352,8 +369,14 @@ def y_to_rgba(y_values: np.ndarray, y_range: tuple[float, float]) -> np.ndarray:
 
 
 def update_plot(frame_data: FrameData, plot, settings: CaptureSettings):
-	pts = points_for_display(frame_data, settings)
+	valid_points = valid_points_for_frame(frame_data, settings)
+	pts = points_for_display(valid_points, settings)
 	scatter = plot['scatter']
+	point_count_label = plot.get('point_count_label')
+	if point_count_label is not None:
+		point_count_label.setText(f'有效點數: {len(valid_points)}')
+		point_count_label.adjustSize()
+
 	if pts.size == 0:
 		scatter.setData(
 			pos=np.empty((0, 3), dtype=np.float32),
