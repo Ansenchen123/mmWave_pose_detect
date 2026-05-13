@@ -45,6 +45,7 @@ INTENSITY_MODE = str(cfg_get(RADAR_CONFIG, 'point_output', 'intensity_mode', def
 SNR_NORM_MEAN = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_mean', default=20.0))
 SNR_NORM_STD = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_std', default=10.0))
 SIDE_INFO_DB_LIMIT = float(cfg_get(RADAR_CONFIG, 'point_output', 'side_info_db_limit', default=100.0))
+VIEWER_VERSION = 'v2-front-view'
 
 
 @dataclass(frozen=True)
@@ -189,7 +190,9 @@ def update_plot(fig, image, status, heatmap: np.ndarray, frame_index: int, point
     vmax = max(float(np.percentile(heatmap, 99.0)), 1.0)
     image.set_clim(0.0, vmax)
     _vertical_axis, vertical_range, vertical_label = projection_axis(settings)
+    cfg_name = os.path.basename(settings.cfg_path)
     status.set_text(
+        f'{VIEWER_VERSION} | cfg {cfg_name} | '
         f'{settings.view_mode} | frame {frame_index} | points {points.shape[0]} | '
         f'X {settings.x_range[0]:.1f}..{settings.x_range[1]:.1f} m | '
         f'{vertical_label.split()[0]} {vertical_range[0]:.1f}..{vertical_range[1]:.1f} m'
