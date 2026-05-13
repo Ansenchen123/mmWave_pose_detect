@@ -45,7 +45,7 @@ INTENSITY_MODE = str(cfg_get(RADAR_CONFIG, 'point_output', 'intensity_mode', def
 SNR_NORM_MEAN = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_mean', default=20.0))
 SNR_NORM_STD = float(cfg_get(RADAR_CONFIG, 'point_output', 'snr_norm_std', default=10.0))
 SIDE_INFO_DB_LIMIT = float(cfg_get(RADAR_CONFIG, 'point_output', 'side_info_db_limit', default=100.0))
-VIEWER_VERSION = 'v2-front-view'
+VIEWER_VERSION = 'v3-depth-color'
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,8 @@ def point_values(points: np.ndarray, mode: str) -> np.ndarray:
     if points.shape[0] == 0:
         return np.zeros((0,), dtype=np.float32)
 
+    if mode == 'depth':
+        return points[:, 1].astype(np.float32, copy=False)
     if mode == 'occupancy':
         return np.ones((points.shape[0],), dtype=np.float32)
     if mode == 'doppler':
@@ -117,6 +119,18 @@ def point_values(points: np.ndarray, mode: str) -> np.ndarray:
 
     intensity = points[:, 4].astype(np.float32, copy=False)
     return np.clip(intensity, 0.0, None)
+
+
+def value_label(mode: str) -> str:
+    if mode == 'depth':
+        return 'Y depth/range (m)'
+    if mode == 'nearest':
+        return 'nearer-is-brighter (1 / Y)'
+    if mode == 'doppler':
+        return 'abs doppler'
+    if mode == 'occupancy':
+        return 'occupancy'
+    return 'intensity/SNR'
 
 
 def projection_axis(settings: ViewerSettings) -> Tuple[int, Tuple[float, float], str]:
@@ -167,7 +181,7 @@ def init_plot(settings: ViewerSettings):
         interpolation='nearest',
     )
     cbar = fig.colorbar(image, ax=ax)
-    cbar.set_label(settings.value_mode)
+    cbar.set_label(value_label(settings.value_mode))
     ax.set_title(title)
     ax.set_xlabel('X left/right (m)')
     ax.set_ylabel(vertical_label)
@@ -193,7 +207,8 @@ def update_plot(fig, image, status, heatmap: np.ndarray, frame_index: int, point
     cfg_name = os.path.basename(settings.cfg_path)
     status.set_text(
         f'{VIEWER_VERSION} | cfg {cfg_name} | '
-        f'{settings.view_mode} | frame {frame_index} | points {points.shape[0]} | '
+        f'{settings.view_mode} | color {value_label(settings.value_mode)} | '
+        f'frame {frame_index} | points {points.shape[0]} | '
         f'X {settings.x_range[0]:.1f}..{settings.x_range[1]:.1f} m | '
         f'{vertical_label.split()[0]} {vertical_range[0]:.1f}..{vertical_range[1]:.1f} m'
     )
@@ -295,9 +310,9 @@ def main() -> int:
     )
     parser.add_argument(
         '--value_mode',
-        choices=['intensity', 'occupancy', 'doppler', 'nearest'],
-        default='intensity',
-        help='Heatmap value: SNR intensity, hit count, speed, or nearer-is-brighter depth',
+        choices=['depth', 'intensity', 'occupancy', 'doppler', 'nearest'],
+        default='depth',
+        help='Heatmap value: Y depth, SNR intensity, hit count, speed, or nearer-is-brighter depth',
     )
     parser.add_argument('--moving_only', action='store_true', help='Keep only points above --min_abs_doppler')
     parser.add_argument('--min_abs_doppler', type=float, default=0.2870, help='Moving-point Doppler threshold')
