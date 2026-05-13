@@ -1,8 +1,8 @@
-"""Top-down pseudo-depth heatmap viewer for TI IWRL6844 UART point clouds.
+"""Pseudo-depth heatmap viewer for TI IWRL6844 UART point clouds.
 
 This script intentionally lives on its own and reuses the existing UART parser.
-It visualizes detected points as a fading X/Y occupancy or intensity map, which
-is easier to read than a sparse 3D scatter plot when checking scene layout.
+It visualizes detected points as a fading heatmap. The top-down view uses X/Y;
+the front view uses X/Z for a thermal-camera-like projection.
 """
 
 from __future__ import annotations
@@ -63,6 +63,7 @@ class ViewerSettings:
     bins_y: int
     decay: float
     update_hz: float
+    view_mode: str
     value_mode: str
     moving_only: bool
     min_abs_doppler: float
@@ -117,14 +118,21 @@ def point_values(points: np.ndarray, mode: str) -> np.ndarray:
     return np.clip(intensity, 0.0, None)
 
 
+def projection_axis(settings: ViewerSettings) -> Tuple[int, Tuple[float, float], str]:
+    if settings.view_mode == 'front':
+        return 2, settings.z_range, 'Z height (m)'
+    return 1, settings.y_range, 'Y depth/range (m)'
+
+
 def add_points_to_heatmap(heatmap: np.ndarray, points: np.ndarray, settings: ViewerSettings) -> None:
     if points.shape[0] == 0:
         return
 
     x_min, x_max = settings.x_range
-    y_min, y_max = settings.y_range
+    vertical_axis, vertical_range, _vertical_label = projection_axis(settings)
+    vertical_min, vertical_max = vertical_range
     x_idx = ((points[:, 0] - x_min) / (x_max - x_min) * settings.bins_x).astype(np.int32)
-    y_idx = ((points[:, 1] - y_min) / (y_max - y_min) * settings.bins_y).astype(np.int32)
+    y_idx = ((points[:, vertical_axis] - vertical_min) / (vertical_max - vertical_min) * settings.bins_y).astype(np.int32)
 
     valid = (
         (x_idx >= 0) & (x_idx < settings.bins_x) &
@@ -141,20 +149,27 @@ def init_plot(settings: ViewerSettings):
     plt.ion()
     fig, ax = plt.subplots(figsize=(8, 6))
     heatmap = np.zeros((settings.bins_y, settings.bins_x), dtype=np.float32)
+    _vertical_axis, vertical_range, vertical_label = projection_axis(settings)
+    cmap = 'inferno' if settings.view_mode == 'front' else 'turbo'
+    title = (
+        'IWRL6844 4T4R Front Pseudo-IR Heatmap'
+        if settings.view_mode == 'front'
+        else 'IWRL6844 4T4R Top-Down Depth Heatmap'
+    )
     image = ax.imshow(
         heatmap,
         origin='lower',
-        extent=(settings.x_range[0], settings.x_range[1], settings.y_range[0], settings.y_range[1]),
+        extent=(settings.x_range[0], settings.x_range[1], vertical_range[0], vertical_range[1]),
         aspect='auto',
-        cmap='turbo',
+        cmap=cmap,
         vmin=0.0,
         interpolation='nearest',
     )
     cbar = fig.colorbar(image, ax=ax)
     cbar.set_label(settings.value_mode)
-    ax.set_title('IWRL6844 4T4R Top-Down Depth Heatmap')
+    ax.set_title(title)
     ax.set_xlabel('X left/right (m)')
-    ax.set_ylabel('Y depth/range (m)')
+    ax.set_ylabel(vertical_label)
     ax.grid(color='white', alpha=0.18, linewidth=0.5)
     status = ax.text(
         0.01,
@@ -173,10 +188,11 @@ def update_plot(fig, image, status, heatmap: np.ndarray, frame_index: int, point
     image.set_data(heatmap)
     vmax = max(float(np.percentile(heatmap, 99.0)), 1.0)
     image.set_clim(0.0, vmax)
+    _vertical_axis, vertical_range, vertical_label = projection_axis(settings)
     status.set_text(
-        f'frame {frame_index} | points {points.shape[0]} | '
+        f'{settings.view_mode} | frame {frame_index} | points {points.shape[0]} | '
         f'X {settings.x_range[0]:.1f}..{settings.x_range[1]:.1f} m | '
-        f'Y {settings.y_range[0]:.1f}..{settings.y_range[1]:.1f} m'
+        f'{vertical_label.split()[0]} {vertical_range[0]:.1f}..{vertical_range[1]:.1f} m'
     )
     fig.canvas.draw_idle()
     fig.canvas.flush_events()
@@ -187,6 +203,7 @@ def run_viewer(settings: ViewerSettings) -> int:
     print(f'[INFO] Config serial port: {settings.port_cfg}')
     print(f'[INFO] Data serial port: {settings.port_data}')
     print(f'[INFO] send_config: {settings.send_config}')
+    print(f'[INFO] view_mode: {settings.view_mode}')
     print(f'[INFO] value_mode: {settings.value_mode}')
     print(f'[INFO] ROI: X{settings.x_range} Y{settings.y_range} Z{settings.z_range}')
 
@@ -250,7 +267,7 @@ def run_viewer(settings: ViewerSettings) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Show a top-down pseudo-depth heatmap from IWRL6844 UART detected points.'
+        description='Show pseudo-depth heatmaps from IWRL6844 UART detected points.'
     )
     parser.add_argument('--cfg', default=DEFAULT_CFG_PATH, help='Radar cfg file path or file name under cfg/')
     parser.add_argument('--port_cfg', default=DEFAULT_CONFIG_PORT, help='Config serial port')
@@ -267,6 +284,12 @@ def main() -> int:
     parser.add_argument('--bins_y', type=int, default=180, help='Depth heatmap bins')
     parser.add_argument('--decay', type=float, default=0.90, help='Temporal decay from 0.0 to 1.0')
     parser.add_argument('--update_hz', type=float, default=12.0, help='Plot refresh rate')
+    parser.add_argument(
+        '--view',
+        choices=['topdown', 'front'],
+        default='topdown',
+        help='Projection view: topdown uses X/Y, front uses X/Z like a sparse pseudo-IR image',
+    )
     parser.add_argument(
         '--value_mode',
         choices=['intensity', 'occupancy', 'doppler', 'nearest'],
@@ -311,6 +334,7 @@ def main() -> int:
         bins_y=args.bins_y,
         decay=args.decay,
         update_hz=args.update_hz,
+        view_mode=args.view,
         value_mode=args.value_mode,
         moving_only=args.moving_only,
         min_abs_doppler=args.min_abs_doppler,
